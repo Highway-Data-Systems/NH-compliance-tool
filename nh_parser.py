@@ -9,6 +9,7 @@ import pandas as pd
 
 PARSER_VERSION = "2026-07-20-ride-calc-v4"
 FLOAT_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
+DATETIME_RE = re.compile(r"\d{1,2}-[A-Za-z]{3}-\d{4}\s*\d{1,2}:\d{2}")
 MPD_RE = re.compile(
     r"^\s*(?P<chainage>\d+(?:\.\d+)?)(?P<line>[A-Z]{2,3})\s+"
     r"(?P<dropouts>\d+(?:\.\d+)?)\s+(?P<mpd>\d+(?:\.\d+)?)\s+"
@@ -49,6 +50,11 @@ def parse_bcd(text: str, name: str = "") -> ParsedSurvey:
         "survey": lines[2].strip() if len(lines) > 2 else "",
         "system": lines[3].strip() if len(lines) > 3 else "",
     }
+    timestamps = _extract_timestamps("\n".join(lines[:4]))
+    if timestamps:
+        metadata["survey_date"] = timestamps[0]
+        if len(timestamps) > 1:
+            metadata["survey_end_date"] = timestamps[1]
     if len(lines) > 1:
         nums = _floats(lines[1])
         if nums:
@@ -130,6 +136,11 @@ def parse_rcd(text: str, name: str = "") -> ParsedSurvey:
         "survey": lines[1].strip() if len(lines) > 1 else "",
         "system": lines[2].strip() if len(lines) > 2 else "",
     }
+    timestamps = _extract_timestamps("\n".join(lines[:3]))
+    if timestamps:
+        metadata["survey_date"] = timestamps[0]
+        if len(timestamps) > 1:
+            metadata["survey_end_date"] = timestamps[1]
     if len(lines) > 3:
         nums = _floats(lines[3])
         if len(nums) >= 7:
@@ -372,6 +383,14 @@ def dataframe_to_csv(df: pd.DataFrame) -> bytes:
 
 def _floats(line: str) -> list[float]:
     return [float(x) for x in FLOAT_RE.findall(line)]
+
+
+def _extract_timestamps(text: str) -> list[str]:
+    timestamps = []
+    for match in DATETIME_RE.findall(text):
+        normalized = re.sub(r"(\d{4})\s*(\d{1,2}:\d{2})", r"\1 \2", match)
+        timestamps.append(re.sub(r"\s+", " ", normalized).strip())
+    return timestamps
 
 
 def _parse_event(line: str) -> dict | None:

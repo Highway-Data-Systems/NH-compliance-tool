@@ -2,8 +2,12 @@ import os
 import subprocess
 import sys
 import base64
+import zipfile
+from datetime import datetime
+from io import BytesIO
 from importlib import reload
 from pathlib import Path
+from xml.sax.saxutils import escape
 
 import numpy as np
 import pandas as pd
@@ -22,6 +26,7 @@ nh_parser = reload(nh_parser)
 BNG_TO_WGS84 = Transformer.from_crs("EPSG:27700", "EPSG:4326", always_xy=True)
 ASSET_DIR = Path(__file__).parent / "assets"
 HDS_LOGO_DARK = ASSET_DIR / "HDS logo landscape small white 2022.png"
+HDS_LOGO_LIGHT = ASSET_DIR / "HDS logo landscape small 2022.png"
 
 
 if __name__ == "__main__" and get_script_run_ctx(suppress_warning=True) is None:
@@ -82,6 +87,243 @@ def _status_card(label: str, status: str, detail: str):
         """,
         unsafe_allow_html=True,
     )
+
+
+def _report_text(value) -> str:
+    if value is None:
+        return "-"
+    if isinstance(value, (float, np.floating)):
+        if pd.isna(value):
+            return "-"
+        return f"{value:,.3f}".rstrip("0").rstrip(".")
+    return str(value)
+
+
+def _status_counts(df: pd.DataFrame) -> tuple[int, int, int]:
+    if df.empty or "status" not in df.columns:
+        return 0, 0, 0
+    pass_count = int((df["status"] == "PASS").sum())
+    fail_count = int((df["status"] == "FAIL").sum())
+    return len(df), pass_count, fail_count
+
+
+def _safe_filename(value: str, fallback: str) -> str:
+    safe_value = "".join(ch if ch.isalnum() or ch in " -_" else "_" for ch in value).strip()
+    return safe_value or fallback
+
+
+def _survey_endpoint_rows(survey) -> list[list[str]]:
+    points = []
+    if {"start_x", "start_y", "end_x", "end_y"}.issubset(survey.metadata):
+        points = [
+            ("Start", survey.metadata.get("start_x"), survey.metadata.get("start_y"), survey.metadata.get("start_z")),
+            ("End", survey.metadata.get("end_x"), survey.metadata.get("end_y"), survey.metadata.get("end_z")),
+        ]
+    elif not survey.geometry.empty and {"x", "y"}.issubset(survey.geometry.columns):
+        start = survey.geometry.iloc[0]
+        end = survey.geometry.iloc[-1]
+        points = [
+            ("Start", start.get("x"), start.get("y"), start.get("z")),
+            ("End", end.get("x"), end.get("y"), end.get("z")),
+        ]
+
+    rows = []
+    for label, east, north, height in points:
+        if east is None or north is None:
+            continue
+        lon, lat = BNG_TO_WGS84.transform(float(east), float(north))
+        rows.append(
+            [
+                f"{label} coordinates",
+                f"E {_report_text(float(east))}, N {_report_text(float(north))}"
+                + (f", Z {_report_text(float(height))}" if height is not None else "")
+                + f" | Lat {_report_text(float(lat))}, Lon {_report_text(float(lon))}",
+            ]
+        )
+    return rows
+
+
+def _csv_bundle_bytes(ride_results: pd.DataFrame, mpd_results: pd.DataFrame) -> bytes:
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("ride_index_results.csv", nh_parser.dataframe_to_csv(ride_results))
+        archive.writestr("mpd_results.csv", nh_parser.dataframe_to_csv(mpd_results))
+    return buffer.getvalue()
+
+
+def _pdf_report_bytes(
+    survey,
+    ride_spec_name: str,
+    ride_spec: dict,
+    mpd_spec_name: str,
+    mpd_spec: dict,
+    exclusions: list[tuple[float, float]],
+    ride_results: pd.DataFrame,
+    mpd_results: pd.DataFrame,
+    ride_status: str,
+    mpd_status: str,
+    overall_status: str,
+) -> bytes:
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.platypus import Image, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=14 * mm,
+        leftMargin=14 * mm,
+        topMargin=12 * mm,
+        bottomMargin=12 * mm,
+        title="National Highways Ride and MPD Evaluation Report",
+    )
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(name="Small", parent=styles["BodyText"], fontSize=8, leading=10))
+    styles.add(
+        ParagraphStyle(
+            name="SmallHeader",
+            parent=styles["Small"],
+            textColor=colors.white,
+            fontName="Helvetica-Bold",
+        )
+    )
+    styles.add(ParagraphStyle(name="Status", parent=styles["BodyText"], fontSize=10, leading=12, alignment=1))
+
+    story = []
+    if HDS_LOGO_LIGHT.exists():
+        logo = Image(str(HDS_LOGO_LIGHT), width=42 * mm, height=42 * mm * 179 / 600)
+        logo.hAlign = "LEFT"
+        story.extend([logo, Spacer(1, 5)])
+
+    survey_name = survey.metadata.get("survey") or survey.metadata.get("file_name") or "Loaded survey"
+    story.append(Paragraph("National Highways Ride and MPD Evaluation Report", styles["Title"]))
+    story.append(Paragraph(escape(str(survey_name)), styles["Heading2"]))
+    story.append(Paragraph(f"Generated: {datetime.now().strftime('%d/%m/%Y %H:%M')}", styles["Small"]))
+    story.append(Spacer(1, 8))
+
+    status_data = [["Overall", "UKRI", "MPD"], [overall_status, ride_status, mpd_status]]
+    status_table = Table(status_data, colWidths=[55 * mm, 55 * mm, 55 * mm])
+    status_table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#262730")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#9ca3af")),
+                ("BACKGROUND", (0, 1), (0, 1), colors.HexColor("#dcfce7" if overall_status == "PASS" else "#fee2e2" if overall_status == "FAIL" else "#f3f4f6")),
+                ("BACKGROUND", (1, 1), (1, 1), colors.HexColor("#dcfce7" if ride_status == "PASS" else "#fee2e2" if ride_status == "FAIL" else "#f3f4f6")),
+                ("BACKGROUND", (2, 1), (2, 1), colors.HexColor("#dcfce7" if mpd_status == "PASS" else "#fee2e2" if mpd_status == "FAIL" else "#f3f4f6")),
+            ]
+        )
+    )
+    story.extend([status_table, Spacer(1, 10)])
+
+    ride_total, ride_pass, ride_fail = _status_counts(ride_results)
+    mpd_total, mpd_pass, mpd_fail = _status_counts(mpd_results)
+    metadata_rows = [
+        ["File type", survey.file_type],
+        ["Survey date", survey.metadata.get("survey_date", "-")],
+        ["Length", _format_m(survey.metadata.get("survey_length_m"))],
+        ["Geometry rows", f"{len(survey.geometry):,}"],
+        ["Ride rows", f"{len(survey.ride_10m):,}"],
+        ["MPD rows", f"{len(survey.mpd_10m):,}"],
+        ["Excluded regions", str(len(exclusions))],
+        ["UKRI assessed sections", f"{ride_total:,} ({ride_pass:,} pass, {ride_fail:,} fail)"],
+        ["MPD assessed sections", f"{mpd_total:,} ({mpd_pass:,} pass, {mpd_fail:,} fail)"],
+    ]
+    metadata_rows.extend(_survey_endpoint_rows(survey))
+    meta_table = Table(metadata_rows, colWidths=[48 * mm, 118 * mm])
+    meta_table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#f3f4f6")),
+                ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#d1d5db")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ]
+        )
+    )
+    story.extend([Paragraph("Survey Summary", styles["Heading2"]), meta_table, Spacer(1, 8)])
+
+    story.append(Paragraph("Specification", styles["Heading2"]))
+    story.append(
+        Paragraph(
+            escape(
+                f"Ride quality: {ride_spec_name}. {ride_spec['surface_type']} on {ride_spec['traffic']}; "
+                f"100% of 10 m values < {ride_spec['all_lt']} and 80% of 10 m values < {ride_spec['pct80_lt']}."
+            ),
+            styles["BodyText"],
+        )
+    )
+    story.append(
+        Paragraph(
+            escape(
+                f"MPD: {mpd_spec_name}. {mpd_spec['material']}, {mpd_spec['application']}; "
+                f"average {mpd_spec['avg_min']} to {mpd_spec['avg_max']} mm, standard deviation <= {mpd_spec['std_max']} mm, "
+                "with at least 50% valid 10 m values."
+            ),
+            styles["BodyText"],
+        )
+    )
+
+    if exclusions:
+        story.extend([Spacer(1, 6), Paragraph("Exclusions", styles["Heading2"])])
+        exclusion_rows = [["Start m", "End m"]] + [[f"{start:,.1f}", f"{end:,.1f}"] for start, end in exclusions[:20]]
+        if len(exclusions) > 20:
+            exclusion_rows.append(["...", f"{len(exclusions) - 20} more"])
+        exclusion_table = Table(exclusion_rows, colWidths=[40 * mm, 40 * mm])
+        exclusion_table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#262730")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#d1d5db")),
+                    ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ]
+            )
+        )
+        story.append(exclusion_table)
+
+    def add_result_table(title: str, df: pd.DataFrame, columns: list[str], max_rows: int = 60):
+        story.extend([PageBreak(), Paragraph(title, styles["Heading2"])])
+        if df.empty:
+            story.append(Paragraph("No assessable data found.", styles["BodyText"]))
+            return
+        fail_df = df[df["status"] == "FAIL"] if "status" in df.columns else pd.DataFrame()
+        table_df = fail_df if not fail_df.empty else df.head(min(20, len(df)))
+        shown = table_df[columns].head(max_rows).copy()
+        rows = [[Paragraph(escape(col), styles["SmallHeader"]) for col in columns]]
+        for _, row in shown.iterrows():
+            rows.append([Paragraph(escape(_report_text(row.get(col))), styles["Small"]) for col in columns])
+        widths = [25 * mm] * len(columns)
+        result_table = Table(rows, colWidths=widths, repeatRows=1)
+        result_table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#262730")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("GRID", (0, 0), (-1, -1), 0.2, colors.HexColor("#d1d5db")),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ]
+            )
+        )
+        caption = "Failed sections are shown below." if not fail_df.empty else "No failed sections; first assessed rows are shown below."
+        if len(table_df) > max_rows:
+            caption += f" Showing first {max_rows:,} of {len(table_df):,} rows."
+        story.extend([Paragraph(caption, styles["BodyText"]), Spacer(1, 4), result_table])
+
+    ride_cols = [c for c in ["metric", "section", "valid_10m_values", "max_ri", "pct_below_lower_limit", "status"] if c in ride_results.columns]
+    mpd_cols = [c for c in ["line", "section", "valid_10m_values", "valid_pct", "avg_mpd_mm", "std_mpd_mm", "status"] if c in mpd_results.columns]
+    add_result_table("UKRI Assessment Detail", ride_results, ride_cols)
+    add_result_table("MPD Assessment Detail", mpd_results, mpd_cols)
+
+    doc.build(story)
+    return buffer.getvalue()
 
 
 def _geometry_with_latlon(geometry: pd.DataFrame) -> pd.DataFrame:
@@ -320,8 +562,18 @@ st.markdown(
 
 with st.sidebar:
     st.header("Specification")
-    ride_spec_name = st.selectbox("Ride quality profile", list(RIDE_SPECS))
-    mpd_spec_name = st.selectbox("MPD profile", list(MPD_SPECS))
+    ride_spec_name = st.selectbox(
+        "Ride quality profile",
+        list(RIDE_SPECS),
+        index=None,
+        placeholder="Select ride quality profile",
+    )
+    mpd_spec_name = st.selectbox(
+        "MPD profile",
+        list(MPD_SPECS),
+        index=None,
+        placeholder="Select MPD profile",
+    )
     map_hover = st.toggle(
         "Map coordinates on charts",
         value=True,
@@ -342,13 +594,8 @@ except Exception as exc:
     st.error(f"Could not parse file: {exc}")
     st.stop()
 
-ride_spec = RIDE_SPECS[ride_spec_name]
-mpd_spec = MPD_SPECS[mpd_spec_name]
 geometry_geo = _geometry_with_latlon(survey.geometry)
 exclusions = nh_parser.exclusion_intervals(survey.events)
-summary_ride_results, summary_mpd_results, ride_status, mpd_status, overall_status = _overall_results(
-    survey, ride_spec, mpd_spec, exclusions
-)
 
 st.subheader(f"{survey.file_type}: {survey.metadata.get('survey') or uploaded.name}")
 
@@ -365,6 +612,24 @@ with st.expander("File metadata", expanded=False):
     if not survey.quality_limits.empty:
         st.write("BCD embedded quality limits")
         st.dataframe(survey.quality_limits, use_container_width=True, hide_index=True)
+
+missing_specs = []
+if ride_spec_name is None:
+    missing_specs.append("Ride quality profile")
+if mpd_spec_name is None:
+    missing_specs.append("MPD profile")
+if missing_specs:
+    st.warning(f"Select {' and '.join(missing_specs)} in the sidebar to run pass/fail checks and exports.")
+    if not survey.geometry.empty:
+        st.markdown("**Survey Location**")
+        _survey_map(geometry_geo)
+    st.stop()
+
+ride_spec = RIDE_SPECS[ride_spec_name]
+mpd_spec = MPD_SPECS[mpd_spec_name]
+summary_ride_results, summary_mpd_results, ride_status, mpd_status, overall_status = _overall_results(
+    survey, ride_spec, mpd_spec, exclusions
+)
 
 tab_summary, tab_ride, tab_mpd, tab_structure = st.tabs(
     ["Summary", "Ride Index", "MPD", "File Structure"]
@@ -394,6 +659,39 @@ with tab_summary:
             f"average {mpd_spec['avg_min']} to {mpd_spec['avg_max']} mm, "
             f"standard deviation <= {mpd_spec['std_max']} mm, with at least 50% valid 10 m values."
         )
+
+    try:
+        report_name = survey.metadata.get("survey") or uploaded.name.rsplit(".", 1)[0]
+        safe_report_name = _safe_filename(report_name, "nh_ride_mpd_report")
+        export_col1, export_col2 = st.columns(2)
+        with export_col1:
+            st.download_button(
+                "Download PDF report",
+                data=_pdf_report_bytes(
+                    survey,
+                    ride_spec_name,
+                    ride_spec,
+                    mpd_spec_name,
+                    mpd_spec,
+                    exclusions,
+                    summary_ride_results,
+                    summary_mpd_results,
+                    ride_status,
+                    mpd_status,
+                    overall_status,
+                ),
+                file_name=f"{safe_report_name}_report.pdf",
+                mime="application/pdf",
+            )
+        with export_col2:
+            st.download_button(
+                "Download CSV results bundle",
+                data=_csv_bundle_bytes(summary_ride_results, summary_mpd_results),
+                file_name=f"{safe_report_name}_results.zip",
+                mime="application/zip",
+            )
+    except ModuleNotFoundError:
+        st.warning("PDF export needs the reportlab package. Run `pip install -r requirements.txt` and restart the app.")
 
     if survey.file_type == "RCD" and not survey.mpd_10m.empty:
         st.info(
