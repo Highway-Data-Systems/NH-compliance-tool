@@ -334,6 +334,68 @@ def evaluate_ride(
     return out
 
 
+def evaluate_ride_combined(
+    ride_df: pd.DataFrame,
+    metric_columns: list[str],
+    spec: dict,
+    exclusions: list[tuple[float, float]] | None = None,
+) -> pd.DataFrame:
+    if ride_df.empty:
+        return pd.DataFrame()
+    metric_columns = [column for column in metric_columns if column in ride_df.columns]
+    if not metric_columns:
+        return pd.DataFrame()
+
+    frames = []
+    for column in metric_columns:
+        track_df = ride_df[["chainage", column]].rename(columns={column: "ri"}).copy()
+        track_df["track"] = column
+        frames.append(track_df)
+    df = pd.concat(frames, ignore_index=True)
+    df = df[(df["ri"] > 0.001) & df["ri"].notna()].copy()
+    df = _apply_exclusions(df, exclusions or [], 10.0)
+    if df.empty:
+        return pd.DataFrame()
+
+    valid_start = 20.0
+    valid_end = np.floor((df["chainage"].max() - 10.0) / 10.0) * 10.0
+    final_start = np.floor(max(valid_end - 300.0, 0.0) / 300.0) * 300.0
+    df = df[(df["chainage"] >= valid_start) & (df["chainage"] < valid_end)].copy()
+    if df.empty:
+        return pd.DataFrame()
+
+    section_start = np.floor(df["chainage"] / 300.0) * 300.0
+    df["section_start"] = np.where(section_start > final_start, final_start, section_start)
+    rows = []
+    for start, group in df.groupby("section_start"):
+        end = valid_end if start == final_start else start + 300.0
+        values = group["ri"]
+        track_values = sorted(group["track"].dropna().unique())
+        rows.append(
+            {
+                "metric": "combined_ukri",
+                "tracks": ", ".join(track_values),
+                "section": f"{start:.0f}-{end:.0f} m",
+                "start_m": start,
+                "end_m": end,
+                "valid_10m_values": int(values.count()),
+                f"ri_lt_{spec['all_lt']}_count": int((values < spec["all_lt"]).sum()),
+                f"ri_lt_{spec['pct80_lt']}_count": int((values < spec["pct80_lt"]).sum()),
+                "max_ri": float(values.max()),
+                "pct_below_lower_limit": float((values < spec["pct80_lt"]).mean() * 100.0),
+                "all_below_limit": bool((values < spec["all_lt"]).all()),
+                "pct80_requirement_met": bool((values < spec["pct80_lt"]).mean() >= 0.8),
+            }
+        )
+
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        out["status"] = np.where(
+            out["all_below_limit"] & out["pct80_requirement_met"], "PASS", "FAIL"
+        )
+    return out
+
+
 def evaluate_mpd(mpd_df: pd.DataFrame, spec: dict) -> pd.DataFrame:
     return evaluate_mpd_with_exclusions(mpd_df, spec, [])
 
@@ -357,6 +419,50 @@ def evaluate_mpd_with_exclusions(
         rows.append(
             {
                 "line": line,
+                "section": f"{start:.0f}-{start + 100:.0f} m",
+                "start_m": start,
+                "end_m": start + 100.0,
+                "valid_10m_values": int(len(group)),
+                "valid_pct": valid_pct,
+                "avg_mpd_mm": avg,
+                "std_mpd_mm": std,
+                "validity_met": valid_pct >= 50.0,
+                "average_met": spec["avg_min"] <= avg <= spec["avg_max"],
+                "std_met": std <= spec["std_max"],
+            }
+        )
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        out["status"] = np.where(
+            out["validity_met"] & out["average_met"] & out["std_met"], "PASS", "FAIL"
+        )
+    return out
+
+
+def evaluate_mpd_combined_with_exclusions(
+    mpd_df: pd.DataFrame,
+    spec: dict,
+    exclusions: list[tuple[float, float]] | None = None,
+) -> pd.DataFrame:
+    if mpd_df.empty:
+        return pd.DataFrame()
+    df = mpd_df[mpd_df["mpd_mm"] > 0.001].copy()
+    df = _apply_exclusions(df, exclusions or [], 10.0)
+    if df.empty:
+        return pd.DataFrame()
+    df["section_start"] = np.floor(df["chainage"] / 100.0) * 100.0
+    rows = []
+    for start, group in df.groupby("section_start"):
+        mpd = group["mpd_mm"]
+        lines = sorted(str(line) for line in group["line"].dropna().unique()) if "line" in group.columns else []
+        expected_values = max(1, len(lines) * 10)
+        valid_pct = min(100.0, len(group) / expected_values * 100.0)
+        avg = float(mpd.mean())
+        std = float(mpd.std(ddof=0))
+        rows.append(
+            {
+                "metric": "combined_mpd",
+                "tracks": ", ".join(lines),
                 "section": f"{start:.0f}-{start + 100:.0f} m",
                 "start_m": start,
                 "end_m": start + 100.0,

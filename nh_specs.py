@@ -40,6 +40,13 @@ MPD_SPECS = {
         "avg_max": 1.5,
         "std_max": 0.2,
     },
+    "10mm English SMA": {
+        "material": "English stone mastic asphalt",
+        "application": "10 mm surface course",
+        "avg_min": 0.9,
+        "avg_max": 1.3,
+        "std_max": 0.2,
+    },
     "Thin surface course 6 mm": {
         "material": "Thin surface course systems to Clause 942",
         "application": "Upper aggregate size of 6 mm",
@@ -76,4 +83,3 @@ MPD_SPECS = {
         "std_max": 0.25,
     },
 }
-

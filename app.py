@@ -319,8 +319,8 @@ def _pdf_report_bytes(
             caption += f" Showing first {max_rows:,} of {len(table_df):,} rows."
         story.extend([Paragraph(caption, styles["BodyText"]), Spacer(1, 4), result_table])
 
-    ride_cols = [c for c in ["metric", "section", "valid_10m_values", "max_ri", "pct_below_lower_limit", "status"] if c in ride_results.columns]
-    mpd_cols = [c for c in ["line", "section", "valid_10m_values", "valid_pct", "avg_mpd_mm", "std_mpd_mm", "status"] if c in mpd_results.columns]
+    ride_cols = [c for c in ["metric", "tracks", "section", "valid_10m_values", "max_ri", "pct_below_lower_limit", "status"] if c in ride_results.columns]
+    mpd_cols = [c for c in ["metric", "tracks", "section", "valid_10m_values", "valid_pct", "avg_mpd_mm", "std_mpd_mm", "status"] if c in mpd_results.columns]
     add_result_table("UKRI Assessment Detail", ride_results, ride_cols)
     add_result_table("MPD Assessment Detail", mpd_results, mpd_cols)
 
@@ -487,17 +487,140 @@ def _nearest_geometry_row(geometry_geo: pd.DataFrame, chainage: float):
     return row.to_dict()
 
 
-def _overall_results(survey, ride_spec: dict, mpd_spec: dict, exclusions: list[tuple[float, float]]):
-    ride_frames = []
-    for metric in ["left_ri", "right_ri"]:
-        if metric in survey.ride_10m.columns:
-            result = nh_parser.evaluate_ride(survey.ride_10m, metric, ride_spec, exclusions)
-            if not result.empty:
-                result = result.copy()
-                result.insert(0, "metric", metric)
-                ride_frames.append(result)
-    ride_results = pd.concat(ride_frames, ignore_index=True) if ride_frames else pd.DataFrame()
-    mpd_results = nh_parser.evaluate_mpd_with_exclusions(survey.mpd_10m, mpd_spec, exclusions) if not survey.mpd_10m.empty else pd.DataFrame()
+def _ukri_track_columns(ride_df: pd.DataFrame) -> list[str]:
+    if ride_df.empty:
+        return []
+    preferred = [column for column in ["ns_ri", "mns_ri", "mos_ri", "os_ri"] if column in ride_df.columns]
+    if preferred:
+        return preferred
+    fallback = [column for column in ["left_ri", "right_ri"] if column in ride_df.columns]
+    extras = [
+        column
+        for column in ride_df.columns
+        if column.endswith("_ri") and column not in set(preferred + fallback + ["combined_ukri"])
+    ]
+    return fallback + extras
+
+
+def _ukri_track_label(column: str) -> str:
+    labels = {
+        "ns_ri": "Nearside UKRI",
+        "mns_ri": "Mid-nearside UKRI",
+        "mos_ri": "Mid-offside UKRI",
+        "os_ri": "Offside UKRI",
+        "left_ri": "Left UKRI",
+        "right_ri": "Right UKRI",
+    }
+    return labels.get(column, column)
+
+
+def _combined_ukri_chart_data(ride_df: pd.DataFrame, track_columns: list[str]) -> pd.DataFrame:
+    if ride_df.empty or not track_columns:
+        return pd.DataFrame()
+    existing_columns = [column for column in track_columns if column in ride_df.columns]
+    if not existing_columns:
+        return pd.DataFrame()
+    chart_df = ride_df[["chainage"] + existing_columns].copy()
+    chart_df["combined_ukri"] = chart_df[existing_columns].replace(0, np.nan).mean(axis=1)
+    return chart_df[["chainage", "combined_ukri"]].dropna()
+
+
+def _mpd_line_options(mpd_df: pd.DataFrame) -> list[str]:
+    if mpd_df.empty or "line" not in mpd_df.columns:
+        return []
+    return sorted(str(line) for line in mpd_df["line"].dropna().unique())
+
+
+def _combined_mpd_chart_data(mpd_df: pd.DataFrame, line_columns: list[str] | None = None) -> pd.DataFrame:
+    if mpd_df.empty:
+        return pd.DataFrame()
+    df = mpd_df.copy()
+    if line_columns and "line" in df.columns:
+        df = df[df["line"].isin(line_columns)]
+    if df.empty:
+        return pd.DataFrame()
+    return (
+        df[df["mpd_mm"] > 0.001]
+        .groupby("chainage", as_index=False)["mpd_mm"]
+        .mean()
+        .rename(columns={"mpd_mm": "combined_mpd_mm"})
+    )
+
+
+def _endpoint_distance(summary_a: pd.DataFrame, summary_b: pd.DataFrame, index: int) -> float | None:
+    if summary_a.empty or summary_b.empty or not {"x", "y"}.issubset(summary_a.columns) or not {"x", "y"}.issubset(summary_b.columns):
+        return None
+    row_a = summary_a.iloc[index]
+    row_b = summary_b.iloc[index]
+    return float(np.hypot(float(row_a["x"]) - float(row_b["x"]), float(row_a["y"]) - float(row_b["y"])))
+
+
+def _route_location_checks(primary, comparison) -> list[dict]:
+    rows = []
+    length_a = primary.metadata.get("survey_length_m")
+    length_b = comparison.metadata.get("survey_length_m")
+    if length_a is not None and length_b is not None:
+        diff = abs(float(length_a) - float(length_b))
+        rows.append(
+            {
+                "check": "Survey length",
+                "primary": _format_m(length_a),
+                "comparison": _format_m(length_b),
+                "difference": _format_m(diff),
+                "status": "PASS" if diff <= 25.0 else "WARN",
+            }
+        )
+
+    for label, idx in [("Start coordinates", 0), ("End coordinates", -1)]:
+        distance = _endpoint_distance(primary.geometry, comparison.geometry, idx)
+        if distance is not None:
+            rows.append(
+                {
+                    "check": label,
+                    "primary": "available",
+                    "comparison": "available",
+                    "difference": f"{distance:,.2f} m",
+                    "status": "PASS" if distance <= 10.0 else "WARN",
+                }
+            )
+    return rows
+
+
+def _apply_chainage_offset(df: pd.DataFrame, offset_m: float) -> pd.DataFrame:
+    if df.empty or "chainage" not in df.columns or abs(offset_m) < 0.001:
+        return df
+    out = df.copy()
+    out["chainage"] = out["chainage"] + offset_m
+    return out
+
+
+def _comparison_delta(primary: pd.DataFrame, comparison: pd.DataFrame, metric: str, suffix_a: str, suffix_b: str) -> pd.DataFrame:
+    if primary.empty or comparison.empty:
+        return pd.DataFrame()
+    left = primary[["chainage", metric]].dropna().sort_values("chainage").rename(columns={metric: suffix_a})
+    right = comparison[["chainage", metric]].dropna().sort_values("chainage").rename(columns={metric: suffix_b})
+    merged = pd.merge_asof(left, right, on="chainage", direction="nearest", tolerance=5.0)
+    merged = merged.dropna(subset=[suffix_b])
+    if merged.empty:
+        return merged
+    merged["delta"] = merged[suffix_b] - merged[suffix_a]
+    return merged
+
+
+def _overall_results(
+    survey,
+    ride_spec: dict,
+    mpd_spec: dict,
+    exclusions: list[tuple[float, float]],
+    ride_tracks: list[str] | None = None,
+    mpd_lines: list[str] | None = None,
+):
+    ride_tracks = ride_tracks or _ukri_track_columns(survey.ride_10m)
+    ride_results = nh_parser.evaluate_ride_combined(survey.ride_10m, ride_tracks, ride_spec, exclusions) if ride_tracks else pd.DataFrame()
+    mpd_source = survey.mpd_10m
+    if mpd_lines and not mpd_source.empty and "line" in mpd_source.columns:
+        mpd_source = mpd_source[mpd_source["line"].isin(mpd_lines)]
+    mpd_results = nh_parser.evaluate_mpd_combined_with_exclusions(mpd_source, mpd_spec, exclusions) if not mpd_source.empty else pd.DataFrame()
 
     ride_status = _status_label(not ride_results.empty, not ride_results.empty and (ride_results["status"] == "FAIL").any())
     mpd_status = _status_label(not mpd_results.empty, not mpd_results.empty and (mpd_results["status"] == "FAIL").any())
@@ -583,10 +706,15 @@ with st.sidebar:
     )
     st.divider()
     uploaded = st.file_uploader("Load BCD or RCD", type=["bcd", "rcd", "txt"])
+    comparison_uploaded = st.file_uploader(
+        "Optional comparison BCD or RCD",
+        type=["bcd", "rcd", "txt"],
+        help="Load a second survey for pre/post or repeat-run comparison.",
+    )
     st.caption("RCD files are preferred as they contain exclusions and structure data. BCD files include derived ride/MPD values.")
 
 if not uploaded:
-    st.info("Choose one of the example BCD files to see pass/fail sections and MPD line checks.")
+    st.info("Choose one of the example BCD files to see pass/fail sections and MPD track checks.")
     st.stop()
 
 try:
@@ -595,6 +723,19 @@ try:
 except Exception as exc:
     st.error(f"Could not parse file: {exc}")
     st.stop()
+
+comparison_survey = None
+comparison_geometry_geo = pd.DataFrame()
+comparison_exclusions = []
+if comparison_uploaded:
+    try:
+        comparison_text = nh_parser.read_uploaded_text(comparison_uploaded)
+        comparison_survey = nh_parser.parse_survey_text(comparison_text, comparison_uploaded.name)
+        comparison_geometry_geo = _geometry_with_latlon(comparison_survey.geometry)
+        comparison_exclusions = nh_parser.exclusion_intervals(comparison_survey.events)
+    except Exception as exc:
+        st.error(f"Could not parse comparison file: {exc}")
+        st.stop()
 
 geometry_geo = _geometry_with_latlon(survey.geometry)
 exclusions = nh_parser.exclusion_intervals(survey.events)
@@ -629,13 +770,43 @@ if missing_specs:
 
 ride_spec = RIDE_SPECS[ride_spec_name]
 mpd_spec = MPD_SPECS[mpd_spec_name]
+available_ukri_tracks = _ukri_track_columns(survey.ride_10m)
+selected_ukri_tracks = available_ukri_tracks
+if available_ukri_tracks:
+    selected_ukri_tracks = st.sidebar.multiselect(
+        "UKRI tracks for calculation",
+        available_ukri_tracks,
+        default=available_ukri_tracks,
+        format_func=_ukri_track_label,
+        help="Combined UKRI pass/fail is calculated from all selected track values in each 300 m section.",
+    )
+    if not selected_ukri_tracks:
+        st.warning("Select at least one UKRI track in the sidebar to run UKRI pass/fail checks.")
+        st.stop()
+available_mpd_lines = _mpd_line_options(survey.mpd_10m)
+selected_mpd_lines = available_mpd_lines
+if available_mpd_lines:
+    selected_mpd_lines = st.sidebar.multiselect(
+        "MPD tracks for calculation",
+        available_mpd_lines,
+        default=available_mpd_lines,
+        help="Combined MPD pass/fail is calculated from all selected track values in each 100 m section.",
+    )
+    if not selected_mpd_lines:
+        st.warning("Select at least one MPD track in the sidebar to run MPD pass/fail checks.")
+        st.stop()
 summary_ride_results, summary_mpd_results, ride_status, mpd_status, overall_status = _overall_results(
-    survey, ride_spec, mpd_spec, exclusions
+    survey, ride_spec, mpd_spec, exclusions, selected_ukri_tracks, selected_mpd_lines
 )
 
-tab_summary, tab_ride, tab_mpd, tab_structure = st.tabs(
-    ["Summary", "Ride Index", "MPD", "File Structure"]
-)
+tab_names = ["Summary", "Ride Index", "MPD"]
+if comparison_survey is not None:
+    tab_names.append("Compare")
+tab_names.append("File Structure")
+tabs = st.tabs(tab_names)
+tab_summary, tab_ride, tab_mpd = tabs[:3]
+tab_compare = tabs[3] if comparison_survey is not None else None
+tab_structure = tabs[-1]
 
 with tab_summary:
     s1, s2, s3 = st.columns(3)
@@ -652,14 +823,17 @@ with tab_summary:
         st.write(
             f"{ride_spec['surface_type']} on {ride_spec['traffic']}: "
             f"100% of 10 m values < {ride_spec['all_lt']} and "
-            f"80% of 10 m values < {ride_spec['pct80_lt']}."
+            f"80% of 10 m values < {ride_spec['pct80_lt']}. "
+            f"Combined UKRI uses {len(selected_ukri_tracks)} selected track(s): "
+            f"{', '.join(_ukri_track_label(track) for track in selected_ukri_tracks)}."
         )
     with c2:
         st.markdown("**MPD Requirement**")
         st.write(
             f"{mpd_spec['material']}, {mpd_spec['application']}: "
             f"average {mpd_spec['avg_min']} to {mpd_spec['avg_max']} mm, "
-            f"standard deviation <= {mpd_spec['std_max']} mm, with at least 50% valid 10 m values."
+            f"standard deviation <= {mpd_spec['std_max']} mm, with at least 50% valid 10 m values. "
+            f"Combined MPD uses {len(selected_mpd_lines)} selected track(s): {', '.join(selected_mpd_lines)}."
         )
 
     try:
@@ -698,7 +872,7 @@ with tab_summary:
     if survey.file_type == "RCD" and not survey.mpd_10m.empty:
         st.info(
             "This RCD contains raw profile data. MPD is derived here by averaging the RCD MSD records into "
-            "10 m line values before applying the 100 m specification checks. Ride Index is derived from the "
+            "10 m track values before applying the 100 m specification checks. Ride Index is derived from the "
             "raw longitudinal profile and assessed as 10 m UKRI values over 300 m sections."
         )
     elif survey.file_type == "RCD":
@@ -735,22 +909,15 @@ with tab_ride:
         else:
             st.info("No derived 10 m ride table was found in this file.")
     else:
-        ride_columns = [c for c in survey.ride_10m.columns if c != "chainage"]
-        side_options = [c for c in ["left_ri", "right_ri"] if c in ride_columns]
-        other_options = [c for c in ride_columns if c not in {"left_ri", "right_ri"}]
-        if side_options:
-            side_metric = st.radio(
-                "UKRI side",
-                side_options,
-                horizontal=True,
-                format_func=lambda value: "Left UKRI" if value == "left_ri" else "Right UKRI",
-            )
-        else:
-            side_metric = None
-        detail_metric = st.selectbox("Other ride metric", other_options, index=0) if other_options else None
-        use_detail_metric = st.toggle("Show dropdown metric", value=False, disabled=detail_metric is None)
-        metric = detail_metric if use_detail_metric and detail_metric else side_metric or detail_metric
-        ride_results = nh_parser.evaluate_ride(survey.ride_10m, metric, ride_spec, exclusions)
+        side_options = selected_ukri_tracks
+        combined_ride = _combined_ukri_chart_data(survey.ride_10m, side_options)
+        metric = "combined_ukri"
+        ride_results = nh_parser.evaluate_ride_combined(survey.ride_10m, side_options, ride_spec, exclusions)
+        chart_data = combined_ride
+        chart_y = "combined_ukri"
+        chart_title = "Combined UKRI by chainage"
+        marker_key = "ride_marker_combined_ukri"
+
         pass_count = int((ride_results["status"] == "PASS").sum()) if not ride_results.empty else 0
         fail_count = int((ride_results["status"] == "FAIL").sum()) if not ride_results.empty else 0
         r1, r2, r3 = st.columns(3)
@@ -758,27 +925,29 @@ with tab_ride:
         r2.metric("Pass", pass_count)
         r3.metric("Fail", fail_count)
 
-        chart_col, map_col = st.columns([2, 1]) if map_hover else (None, None)
-        if map_hover:
-            ride_marker_key = f"ride_marker_{metric}"
+        if chart_data.empty or chart_y not in chart_data.columns:
+            st.info("No combined UKRI chart data was found for the selected ride view.")
+        elif map_hover:
+            chart_col, map_col = st.columns([2, 1])
             with chart_col:
                 _line_chart(
-                    survey.ride_10m,
+                    chart_data,
                     "chainage",
-                    metric,
-                    f"{metric} by chainage",
+                    chart_y,
+                    chart_title,
                     geometry_geo,
                     map_hover,
                     exclusions,
                     f"ride_{metric}",
-                    st.session_state.get(ride_marker_key),
-                    ride_marker_key,
+                    st.session_state.get(marker_key),
+                    marker_key,
                 )
             with map_col:
-                selected_chainage = _chainage_picker(survey.ride_10m, "Map marker chainage", ride_marker_key)
+                selected_chainage = _chainage_picker(chart_data, "Map marker chainage", marker_key)
                 _survey_map(geometry_geo, height=360, selected_chainage=selected_chainage)
         else:
-            _line_chart(survey.ride_10m, "chainage", metric, f"{metric} by chainage", geometry_geo, map_hover, exclusions, f"ride_{metric}")
+            _line_chart(chart_data, "chainage", chart_y, chart_title, geometry_geo, map_hover, exclusions, f"ride_{metric}")
+
         st.dataframe(_style_status(ride_results), use_container_width=True, hide_index=True)
         st.download_button(
             "Download ride results CSV",
@@ -787,29 +956,53 @@ with tab_ride:
             mime="text/csv",
         )
 
+        show_track_charts = st.toggle("Show individual UKRI track charts", value=False, disabled=not side_options)
+        if show_track_charts:
+            for track in side_options:
+                track_label = _ukri_track_label(track)
+                track_results = nh_parser.evaluate_ride(survey.ride_10m, track, ride_spec, exclusions)
+                st.write(track_label)
+                if map_hover:
+                    chart_col, map_col = st.columns([2, 1])
+                    track_marker_key = f"ride_marker_{track}"
+                    with chart_col:
+                        _line_chart(
+                            survey.ride_10m,
+                            "chainage",
+                            track,
+                            f"{track_label} by chainage",
+                            geometry_geo,
+                            map_hover,
+                            exclusions,
+                            f"ride_track_{track}",
+                            st.session_state.get(track_marker_key),
+                            track_marker_key,
+                        )
+                    with map_col:
+                        selected_chainage = _chainage_picker(survey.ride_10m, "Map marker chainage", track_marker_key)
+                        _survey_map(geometry_geo, height=320, selected_chainage=selected_chainage)
+                else:
+                    _line_chart(survey.ride_10m, "chainage", track, f"{track_label} by chainage", geometry_geo, map_hover, exclusions, f"ride_track_{track}")
+                st.dataframe(_style_status(track_results), use_container_width=True, hide_index=True)
+
 with tab_mpd:
     if survey.mpd_10m.empty:
         st.info("No derived MPD rows were found in this file.")
     else:
         if "source" in survey.mpd_10m.columns:
             st.caption("RCD MPD rows are derived from MSD records by 10 m averaging.")
-        line_options = sorted(survey.mpd_10m["line"].unique())
-        selected_lines = st.multiselect("Measurement lines", line_options, default=line_options)
+        selected_lines = selected_mpd_lines
         mpd_source = survey.mpd_10m[survey.mpd_10m["line"].isin(selected_lines)]
-        mpd_results = nh_parser.evaluate_mpd_with_exclusions(mpd_source, mpd_spec, exclusions)
+        mpd_results = nh_parser.evaluate_mpd_combined_with_exclusions(mpd_source, mpd_spec, exclusions)
         pass_count = int((mpd_results["status"] == "PASS").sum()) if not mpd_results.empty else 0
         fail_count = int((mpd_results["status"] == "FAIL").sum()) if not mpd_results.empty else 0
         m1, m2, m3 = st.columns(3)
-        m1.metric("100 m line sections", len(mpd_results))
+        m1.metric("100 m sections", len(mpd_results))
         m2.metric("Pass", pass_count)
         m3.metric("Fail", fail_count)
 
-        avg_mpd = (
-            mpd_source.groupby("chainage", as_index=False)["mpd_mm"]
-            .mean()
-            .rename(columns={"mpd_mm": "average_mpd_mm"})
-        )
-        st.markdown("**Average MPD**")
+        avg_mpd = _combined_mpd_chart_data(mpd_source, selected_lines)
+        st.markdown("**Combined MPD**")
         if map_hover:
             chart_col, map_col = st.columns([2, 1])
             avg_marker_key = "mpd_average_marker"
@@ -817,8 +1010,8 @@ with tab_mpd:
                 _line_chart(
                     avg_mpd,
                     "chainage",
-                    "average_mpd_mm",
-                    "Average MPD by chainage",
+                    "combined_mpd_mm",
+                    "Combined MPD by chainage",
                     geometry_geo,
                     map_hover,
                     exclusions,
@@ -830,13 +1023,22 @@ with tab_mpd:
                 selected_chainage = _chainage_picker(avg_mpd, "Map marker chainage", avg_marker_key)
                 _survey_map(geometry_geo, height=320, selected_chainage=selected_chainage)
         else:
-            _line_chart(avg_mpd, "chainage", "average_mpd_mm", "Average MPD by chainage", geometry_geo, map_hover, exclusions, "mpd_average")
+            _line_chart(avg_mpd, "chainage", "combined_mpd_mm", "Combined MPD by chainage", geometry_geo, map_hover, exclusions, "mpd_average")
 
-        show_line_charts = st.toggle("Show individual MPD line charts", value=False)
+        st.dataframe(_style_status(mpd_results), use_container_width=True, hide_index=True)
+        st.download_button(
+            "Download MPD results CSV",
+            data=nh_parser.dataframe_to_csv(mpd_results),
+            file_name="mpd_results.csv",
+            mime="text/csv",
+        )
+
+        show_line_charts = st.toggle("Show individual MPD track charts", value=False)
         if show_line_charts:
             for line in selected_lines:
                 line_df = mpd_source[mpd_source["line"] == line]
-                st.write(f"Line {line}")
+                line_results = nh_parser.evaluate_mpd_with_exclusions(line_df, mpd_spec, exclusions)
+                st.write(f"Track {line}")
                 if map_hover:
                     chart_col, map_col = st.columns([2, 1])
                     mpd_marker_key = f"mpd_marker_{line}"
@@ -845,7 +1047,7 @@ with tab_mpd:
                             line_df,
                             "chainage",
                             "mpd_mm",
-                            f"MPD line {line}",
+                            f"MPD track {line}",
                             geometry_geo,
                             map_hover,
                             exclusions,
@@ -857,15 +1059,110 @@ with tab_mpd:
                         selected_chainage = _chainage_picker(line_df, "Map marker chainage", mpd_marker_key)
                         _survey_map(geometry_geo, height=320, selected_chainage=selected_chainage)
                 else:
-                    _line_chart(line_df, "chainage", "mpd_mm", f"MPD line {line}", geometry_geo, map_hover, exclusions, f"mpd_{line}")
+                    _line_chart(line_df, "chainage", "mpd_mm", f"MPD track {line}", geometry_geo, map_hover, exclusions, f"mpd_{line}")
+                st.dataframe(_style_status(line_results), use_container_width=True, hide_index=True)
 
-        st.dataframe(_style_status(mpd_results), use_container_width=True, hide_index=True)
-        st.download_button(
-            "Download MPD results CSV",
-            data=nh_parser.dataframe_to_csv(mpd_results),
-            file_name="mpd_results.csv",
-            mime="text/csv",
+if tab_compare is not None:
+    with tab_compare:
+        st.markdown("**Comparison Checks**")
+        check_rows = _route_location_checks(survey, comparison_survey)
+        if check_rows:
+            st.dataframe(_style_status(pd.DataFrame(check_rows)), use_container_width=True, hide_index=True)
+        else:
+            st.info("No geometry/length metadata was available for route location checks.")
+
+        comparison_ukri_tracks = _ukri_track_columns(comparison_survey.ride_10m)
+        common_ukri_tracks = [track for track in selected_ukri_tracks if track in comparison_ukri_tracks]
+        comparison_mpd_lines = _mpd_line_options(comparison_survey.mpd_10m)
+        common_mpd_lines = [line for line in selected_mpd_lines if line in comparison_mpd_lines]
+
+        st.markdown("**Alignment**")
+        enable_offset = st.toggle(
+            "Apply chainage offset to comparison dataset",
+            value=False,
+            help="Use this when repeat surveys start a little earlier/later along the same route.",
         )
+        length_hint = float(survey.metadata.get("survey_length_m") or 0.0)
+        max_offset = max(100.0, min(500.0, length_hint * 0.1 if length_hint else 100.0))
+        offset_m = (
+            st.slider("Comparison chainage offset (m)", -max_offset, max_offset, 0.0, 1.0)
+            if enable_offset
+            else 0.0
+        )
+
+        if not common_ukri_tracks and not common_mpd_lines:
+            st.warning("No matching UKRI tracks or MPD tracks were found between the two datasets.")
+
+        comp_ride = _apply_chainage_offset(comparison_survey.ride_10m, offset_m)
+        comp_mpd = _apply_chainage_offset(comparison_survey.mpd_10m, offset_m)
+
+        if common_ukri_tracks:
+            st.markdown("**Combined UKRI Comparison**")
+            primary_ukri = _combined_ukri_chart_data(survey.ride_10m, common_ukri_tracks)
+            comparison_ukri = _combined_ukri_chart_data(comp_ride, common_ukri_tracks)
+            comparison_chart = pd.concat(
+                [
+                    primary_ukri.assign(dataset="Primary"),
+                    comparison_ukri.assign(dataset="Comparison"),
+                ],
+                ignore_index=True,
+            )
+            if not comparison_chart.empty:
+                fig = px.line(
+                    comparison_chart,
+                    x="chainage",
+                    y="combined_ukri",
+                    color="dataset",
+                    title="Combined UKRI comparison",
+                )
+                for start, end in exclusions:
+                    fig.add_vrect(x0=start, x1=end, fillcolor="rgba(239, 68, 68, 0.14)", line_width=0)
+                fig.update_layout(height=360, margin=dict(l=10, r=10, t=45, b=10))
+                st.plotly_chart(fig, use_container_width=True)
+
+            ukri_delta = _comparison_delta(primary_ukri, comparison_ukri, "combined_ukri", "primary_ukri", "comparison_ukri")
+            if not ukri_delta.empty:
+                d1, d2, d3 = st.columns(3)
+                d1.metric("Matched UKRI points", f"{len(ukri_delta):,}")
+                d2.metric("Mean delta", f"{ukri_delta['delta'].mean():.3f}")
+                d3.metric("Max abs delta", f"{ukri_delta['delta'].abs().max():.3f}")
+                st.dataframe(ukri_delta.head(500), use_container_width=True, hide_index=True)
+        elif not survey.ride_10m.empty or not comparison_survey.ride_10m.empty:
+            st.info("No matching UKRI tracks were found for comparison.")
+
+        if common_mpd_lines:
+            st.markdown("**Combined MPD Comparison**")
+            primary_mpd = _combined_mpd_chart_data(survey.mpd_10m, common_mpd_lines)
+            comparison_mpd = _combined_mpd_chart_data(comp_mpd, common_mpd_lines)
+            comparison_chart = pd.concat(
+                [
+                    primary_mpd.assign(dataset="Primary"),
+                    comparison_mpd.assign(dataset="Comparison"),
+                ],
+                ignore_index=True,
+            )
+            if not comparison_chart.empty:
+                fig = px.line(
+                    comparison_chart,
+                    x="chainage",
+                    y="combined_mpd_mm",
+                    color="dataset",
+                    title="Combined MPD comparison",
+                )
+                for start, end in exclusions:
+                    fig.add_vrect(x0=start, x1=end, fillcolor="rgba(239, 68, 68, 0.14)", line_width=0)
+                fig.update_layout(height=360, margin=dict(l=10, r=10, t=45, b=10))
+                st.plotly_chart(fig, use_container_width=True)
+
+            mpd_delta = _comparison_delta(primary_mpd, comparison_mpd, "combined_mpd_mm", "primary_mpd_mm", "comparison_mpd_mm")
+            if not mpd_delta.empty:
+                d1, d2, d3 = st.columns(3)
+                d1.metric("Matched MPD points", f"{len(mpd_delta):,}")
+                d2.metric("Mean delta", f"{mpd_delta['delta'].mean():.3f} mm")
+                d3.metric("Max abs delta", f"{mpd_delta['delta'].abs().max():.3f} mm")
+                st.dataframe(mpd_delta.head(500), use_container_width=True, hide_index=True)
+        elif not survey.mpd_10m.empty or not comparison_survey.mpd_10m.empty:
+            st.info("No matching MPD tracks were found for comparison.")
 
 with tab_structure:
     if not survey.events.empty:
