@@ -320,7 +320,7 @@ def _pdf_report_bytes(
         story.extend([Paragraph(caption, styles["BodyText"]), Spacer(1, 4), result_table])
 
     ride_cols = [c for c in ["metric", "tracks", "section", "valid_10m_values", "max_ri", "pct_below_lower_limit", "status"] if c in ride_results.columns]
-    mpd_cols = [c for c in ["metric", "tracks", "section", "valid_10m_values", "valid_pct", "avg_mpd_mm", "std_mpd_mm", "status"] if c in mpd_results.columns]
+    mpd_cols = [c for c in ["metric", "tracks", "section", "valid_10m_values", "expected_10m_values", "valid_pct", "avg_mpd_mm", "std_mpd_mm", "status"] if c in mpd_results.columns]
     add_result_table("UKRI Assessment Detail", ride_results, ride_cols)
     add_result_table("MPD Assessment Detail", mpd_results, mpd_cols)
 
@@ -741,6 +741,7 @@ geometry_geo = _geometry_with_latlon(survey.geometry)
 exclusions = nh_parser.exclusion_intervals(survey.events)
 
 st.subheader(f"{survey.file_type}: {survey.metadata.get('survey') or uploaded.name}")
+export_prefix = _safe_filename(Path(uploaded.name).stem, "nh_ride_mpd_report")
 
 meta_cols = st.columns(5)
 meta_cols[0].metric("Length", _format_m(survey.metadata.get("survey_length_m")))
@@ -838,7 +839,7 @@ with tab_summary:
 
     try:
         report_name = survey.metadata.get("survey") or uploaded.name.rsplit(".", 1)[0]
-        safe_report_name = _safe_filename(report_name, "nh_ride_mpd_report")
+        safe_report_name = _safe_filename(report_name, export_prefix)
         export_col1, export_col2 = st.columns(2)
         with export_col1:
             st.download_button(
@@ -863,7 +864,7 @@ with tab_summary:
             st.download_button(
                 "Download CSV results bundle",
                 data=_csv_bundle_bytes(summary_ride_results, summary_mpd_results),
-                file_name=f"{safe_report_name}_results.zip",
+                file_name=f"{export_prefix}_combined_results.zip",
                 mime="application/zip",
             )
     except ModuleNotFoundError:
@@ -952,7 +953,7 @@ with tab_ride:
         st.download_button(
             "Download combined UKRI results CSV",
             data=nh_parser.dataframe_to_csv(ride_results),
-            file_name="combined_ukri_results.csv",
+            file_name=f"{export_prefix}_combined_ukri_results.csv",
             mime="text/csv",
         )
 
@@ -1029,7 +1030,7 @@ with tab_mpd:
         st.download_button(
             "Download combined MPD results CSV",
             data=nh_parser.dataframe_to_csv(mpd_results),
-            file_name="combined_mpd_results.csv",
+            file_name=f"{export_prefix}_combined_mpd_results.csv",
             mime="text/csv",
         )
 

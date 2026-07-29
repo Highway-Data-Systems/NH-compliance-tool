@@ -287,6 +287,23 @@ def _apply_exclusions(df: pd.DataFrame, intervals: list[tuple[float, float]], le
     return df[keep].copy()
 
 
+def _expected_10m_values_after_exclusions(
+    section_start: float,
+    section_length_m: float,
+    track_count: int,
+    intervals: list[tuple[float, float]],
+) -> int:
+    slots_per_track = int(round(section_length_m / 10.0))
+    available_slots = 0
+    for slot_index in range(slots_per_track):
+        slot_start = float(section_start) + slot_index * 10.0
+        slot_end = slot_start + 10.0
+        is_excluded = any(slot_start < end and slot_end > start for start, end in intervals)
+        if not is_excluded:
+            available_slots += 1
+    return max(0, available_slots * max(1, int(track_count)))
+
+
 def evaluate_ride(
     ride_df: pd.DataFrame,
     metric_column: str,
@@ -407,13 +424,15 @@ def evaluate_mpd_with_exclusions(
 ) -> pd.DataFrame:
     if mpd_df.empty:
         return pd.DataFrame()
+    intervals = exclusions or []
     df = mpd_df[mpd_df["mpd_mm"] > 0.001].copy()
-    df = _apply_exclusions(df, exclusions or [], 10.0)
+    df = _apply_exclusions(df, intervals, 10.0)
     df["section_start"] = np.floor(df["chainage"] / 100.0) * 100.0
     rows = []
     for (line, start), group in df.groupby(["line", "section_start"]):
         mpd = group["mpd_mm"]
-        valid_pct = min(100.0, len(group) / 10.0 * 100.0)
+        expected_values = _expected_10m_values_after_exclusions(start, 100.0, 1, intervals)
+        valid_pct = 100.0 if expected_values == 0 else min(100.0, len(group) / expected_values * 100.0)
         avg = float(mpd.mean())
         std = float(mpd.std(ddof=0))
         rows.append(
@@ -423,6 +442,7 @@ def evaluate_mpd_with_exclusions(
                 "start_m": start,
                 "end_m": start + 100.0,
                 "valid_10m_values": int(len(group)),
+                "expected_10m_values": int(expected_values),
                 "valid_pct": valid_pct,
                 "avg_mpd_mm": avg,
                 "std_mpd_mm": std,
@@ -446,8 +466,9 @@ def evaluate_mpd_combined_with_exclusions(
 ) -> pd.DataFrame:
     if mpd_df.empty:
         return pd.DataFrame()
+    intervals = exclusions or []
     df = mpd_df[mpd_df["mpd_mm"] > 0.001].copy()
-    df = _apply_exclusions(df, exclusions or [], 10.0)
+    df = _apply_exclusions(df, intervals, 10.0)
     if df.empty:
         return pd.DataFrame()
     df["section_start"] = np.floor(df["chainage"] / 100.0) * 100.0
@@ -455,8 +476,8 @@ def evaluate_mpd_combined_with_exclusions(
     for start, group in df.groupby("section_start"):
         mpd = group["mpd_mm"]
         lines = sorted(str(line) for line in group["line"].dropna().unique()) if "line" in group.columns else []
-        expected_values = max(1, len(lines) * 10)
-        valid_pct = min(100.0, len(group) / expected_values * 100.0)
+        expected_values = _expected_10m_values_after_exclusions(start, 100.0, len(lines), intervals)
+        valid_pct = 100.0 if expected_values == 0 else min(100.0, len(group) / expected_values * 100.0)
         avg = float(mpd.mean())
         std = float(mpd.std(ddof=0))
         rows.append(
@@ -467,6 +488,7 @@ def evaluate_mpd_combined_with_exclusions(
                 "start_m": start,
                 "end_m": start + 100.0,
                 "valid_10m_values": int(len(group)),
+                "expected_10m_values": int(expected_values),
                 "valid_pct": valid_pct,
                 "avg_mpd_mm": avg,
                 "std_mpd_mm": std,
