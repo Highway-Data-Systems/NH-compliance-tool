@@ -31,6 +31,7 @@ HDS_LOGO_DARK = ASSET_DIR / "HDS logo landscape small white 2022.png"
 HDS_LOGO_LIGHT = ASSET_DIR / "HDS logo landscape small 2022.png"
 
 
+
 if __name__ == "__main__" and get_script_run_ctx(suppress_warning=True) is None:
     subprocess.run(
         [sys.executable, "-m", "streamlit", "run", os.path.abspath(__file__)],
@@ -628,7 +629,14 @@ def _overall_results(
     return ride_results, mpd_results, ride_status, mpd_status, overall_status
 
 
-st.set_page_config(page_title="NH Ride and MPD Evaluator", layout="wide")
+#st.set_page_config(page_title="NH Ride and MPD Evaluator", layout="wide")
+
+st.set_page_config(
+    page_title="NH Ride and MPD Evaluator",
+    page_icon="../favicon.ico",
+    layout="wide",
+)
+
 
 st.markdown(
     """
