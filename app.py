@@ -148,8 +148,8 @@ def _survey_endpoint_rows(survey) -> list[list[str]]:
 def _csv_bundle_bytes(ride_results: pd.DataFrame, mpd_results: pd.DataFrame) -> bytes:
     buffer = BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("ride_index_results.csv", nh_parser.dataframe_to_csv(ride_results))
-        archive.writestr("mpd_results.csv", nh_parser.dataframe_to_csv(mpd_results))
+        archive.writestr("combined_ukri_results.csv", nh_parser.dataframe_to_csv(ride_results))
+        archive.writestr("combined_mpd_results.csv", nh_parser.dataframe_to_csv(mpd_results))
     return buffer.getvalue()
 
 
@@ -950,9 +950,9 @@ with tab_ride:
 
         st.dataframe(_style_status(ride_results), use_container_width=True, hide_index=True)
         st.download_button(
-            "Download ride results CSV",
+            "Download combined UKRI results CSV",
             data=nh_parser.dataframe_to_csv(ride_results),
-            file_name="ride_results.csv",
+            file_name="combined_ukri_results.csv",
             mime="text/csv",
         )
 
@@ -1027,9 +1027,9 @@ with tab_mpd:
 
         st.dataframe(_style_status(mpd_results), use_container_width=True, hide_index=True)
         st.download_button(
-            "Download MPD results CSV",
+            "Download combined MPD results CSV",
             data=nh_parser.dataframe_to_csv(mpd_results),
-            file_name="mpd_results.csv",
+            file_name="combined_mpd_results.csv",
             mime="text/csv",
         )
 
