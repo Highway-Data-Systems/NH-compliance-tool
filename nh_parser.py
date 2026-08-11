@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 
-PARSER_VERSION = "2026-08-11-bcd-exclusions-ri-filter-v5"
+PARSER_VERSION = "2026-08-11-bcd-ukri-elvp-exclusion-v6"
 MAX_REASONABLE_RI = 100.0
 FLOAT_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
 DATETIME_RE = re.compile(r"\d{1,2}-[A-Za-z]{3}-\d{4}\s*\d{1,2}:\d{2}")
@@ -103,15 +103,19 @@ def parse_bcd(text: str, name: str = "") -> ParsedSurvey:
             )
         elif _looks_like_bcd_ride_row(line, nums):
             mode = "ride"
+            ns_ri = _roughness_index(nums[1], nums[2])
+            os_ri = _roughness_index(nums[4], nums[5])
             ride_rows.append(
                 {
                     "chainage": nums[0],
                     "ns_elpv3": nums[1],
                     "ns_elpv10": nums[2],
-                    "ns_ri": nums[3],
+                    "ns_ri": ns_ri,
+                    "ns_quality_code": nums[3],
                     "os_elpv3": nums[4],
                     "os_elpv10": nums[5],
-                    "os_ri": nums[6],
+                    "os_ri": os_ri,
+                    "os_quality_code": nums[6],
                 }
             )
 
