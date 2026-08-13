@@ -154,6 +154,228 @@ def _csv_bundle_bytes(ride_results: pd.DataFrame, mpd_results: pd.DataFrame) -> 
     return buffer.getvalue()
 
 
+def _load_pyplot():
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    return plt
+
+
+def _fig_to_png_bytes(fig, dpi: int = 150) -> bytes:
+    buffer = BytesIO()
+    fig.savefig(buffer, format="png", dpi=dpi, bbox_inches="tight", facecolor="white")
+    import matplotlib.pyplot as plt
+
+    plt.close(fig)
+    return buffer.getvalue()
+
+
+def _ride_chart_png(ride_df: pd.DataFrame, tracks: list[str], ride_spec: dict, exclusions: list[tuple[float, float]]):
+    data = _combined_ukri_chart_data(ride_df, tracks)
+    if data.empty:
+        return None
+    plt = _load_pyplot()
+    x = data["chainage"].to_numpy(dtype=float)
+    y = data["combined_ukri"].to_numpy(dtype=float)
+    all_lt = float(ride_spec["all_lt"])
+    pct80 = float(ride_spec["pct80_lt"])
+    ymax = max(all_lt * 1.25, float(np.nanmax(y)) * 1.1 if y.size else all_lt, all_lt + 1.0)
+    fig, ax = plt.subplots(figsize=(7.3, 2.9))
+    ax.axhspan(0, pct80, color="#dcfce7", zorder=0, label=f"Target < {pct80}")
+    ax.axhspan(pct80, all_lt, color="#fef9c3", zorder=0, label=f"Caution {pct80}-{all_lt}")
+    ax.axhspan(all_lt, ymax, color="#fee2e2", zorder=0, label=f"Fail > {all_lt}")
+    ax.axhline(pct80, color="#ca8a04", lw=1.0, ls="--")
+    ax.axhline(all_lt, color="#dc2626", lw=1.1, ls="--")
+    for start, end in exclusions or []:
+        ax.axvspan(start, end, color="#6b7280", alpha=0.30, zorder=1)
+    ax.plot(x, y, color="#1d4ed8", lw=1.0, zorder=3, label="Combined UKRI")
+    if x.size:
+        ax.set_xlim(float(x.min()), float(x.max()))
+    ax.set_ylim(0, ymax)
+    ax.set_xlabel("Chainage (m)", fontsize=8)
+    ax.set_ylabel("UKRI", fontsize=8)
+    ax.tick_params(labelsize=7)
+    ax.grid(True, color="#e5e7eb", lw=0.5)
+    ax.legend(loc="upper right", fontsize=6, ncol=2, framealpha=0.85)
+    ax.set_title("Combined UKRI vs chainage with specification bands", fontsize=9)
+    return _fig_to_png_bytes(fig)
+
+
+def _mpd_chart_png(mpd_df: pd.DataFrame, lines: list[str], mpd_spec: dict, exclusions: list[tuple[float, float]]):
+    data = _combined_mpd_chart_data(mpd_df, lines)
+    if data.empty:
+        return None
+    plt = _load_pyplot()
+    x = data["chainage"].to_numpy(dtype=float)
+    y = data["combined_mpd_mm"].to_numpy(dtype=float)
+    avg_min = float(mpd_spec["avg_min"])
+    avg_max = float(mpd_spec["avg_max"])
+    ymax = max(avg_max * 1.35, float(np.nanmax(y)) * 1.1 if y.size else avg_max)
+    ymin = min(0.0, (float(np.nanmin(y)) * 0.9 if y.size else 0.0))
+    fig, ax = plt.subplots(figsize=(7.3, 2.9))
+    ax.axhspan(avg_min, avg_max, color="#dcfce7", zorder=0, label=f"Spec range {avg_min}-{avg_max} mm")
+    ax.axhline(avg_min, color="#16a34a", lw=1.0, ls="--")
+    ax.axhline(avg_max, color="#16a34a", lw=1.0, ls="--")
+    for start, end in exclusions or []:
+        ax.axvspan(start, end, color="#6b7280", alpha=0.30, zorder=1)
+    ax.plot(x, y, color="#7c3aed", lw=1.0, zorder=3, label="Combined MPD")
+    if x.size:
+        ax.set_xlim(float(x.min()), float(x.max()))
+    ax.set_ylim(ymin, ymax)
+    ax.set_xlabel("Chainage (m)", fontsize=8)
+    ax.set_ylabel("MPD (mm)", fontsize=8)
+    ax.tick_params(labelsize=7)
+    ax.grid(True, color="#e5e7eb", lw=0.5)
+    ax.legend(loc="upper right", fontsize=6, framealpha=0.85)
+    ax.set_title("Combined MPD vs chainage with specification range", fontsize=9)
+    return _fig_to_png_bytes(fig)
+
+
+def _deg2num(lon_deg, lat_deg, zoom: int):
+    n = 2.0 ** zoom
+    xt = (lon_deg + 180.0) / 360.0 * n
+    lat_rad = np.radians(lat_deg)
+    yt = (1.0 - np.arcsinh(np.tan(lat_rad)) / np.pi) / 2.0 * n
+    return xt, yt
+
+
+def _osm_route_map_png(geometry_geo: pd.DataFrame, exclusions: list[tuple[float, float]]):
+    import urllib.request
+    from PIL import Image
+
+    lat = geometry_geo["lat"].to_numpy(dtype=float)
+    lon = geometry_geo["lon"].to_numpy(dtype=float)
+    lat_min, lat_max = float(np.nanmin(lat)), float(np.nanmax(lat))
+    lon_min, lon_max = float(np.nanmin(lon)), float(np.nanmax(lon))
+    pad_lat = max((lat_max - lat_min) * 0.18, 0.0025)
+    pad_lon = max((lon_max - lon_min) * 0.18, 0.0025)
+    lat_min -= pad_lat
+    lat_max += pad_lat
+    lon_min -= pad_lon
+    lon_max += pad_lon
+
+    zoom = 12
+    for candidate in range(17, 4, -1):
+        x0, y0 = _deg2num(lon_min, lat_max, candidate)
+        x1, y1 = _deg2num(lon_max, lat_min, candidate)
+        span = (abs(x1 - x0) + 1) * (abs(y1 - y0) + 1)
+        if span <= 24 and max(abs(x1 - x0), abs(y1 - y0)) >= 1.0:
+            zoom = candidate
+            break
+
+    x0f, y0f = _deg2num(lon_min, lat_max, zoom)
+    x1f, y1f = _deg2num(lon_max, lat_min, zoom)
+    xt_min, xt_max = int(np.floor(min(x0f, x1f))), int(np.floor(max(x0f, x1f)))
+    yt_min, yt_max = int(np.floor(min(y0f, y1f))), int(np.floor(max(y0f, y1f)))
+    n_tiles = (xt_max - xt_min + 1) * (yt_max - yt_min + 1)
+    if n_tiles < 1 or n_tiles > 40:
+        return None
+
+    tile = 256
+    mosaic = Image.new("RGB", ((xt_max - xt_min + 1) * tile, (yt_max - yt_min + 1) * tile), "#e5e7eb")
+    headers = {"User-Agent": "HDS-NH-Ride-MPD-Report/1.0 (highwaydata.systems)"}
+    for tx in range(xt_min, xt_max + 1):
+        for ty in range(yt_min, yt_max + 1):
+            url = f"https://tile.openstreetmap.org/{zoom}/{tx}/{ty}.png"
+            request = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(request, timeout=6) as response:
+                img = Image.open(BytesIO(response.read())).convert("RGB")
+            mosaic.paste(img, ((tx - xt_min) * tile, (ty - yt_min) * tile))
+
+    def to_px(lon_deg, lat_deg):
+        xt, yt = _deg2num(lon_deg, lat_deg, zoom)
+        return (xt - xt_min) * tile, (yt - yt_min) * tile
+
+    plt = _load_pyplot()
+    fig, ax = plt.subplots(figsize=(7.1, 4.3))
+    ax.imshow(np.asarray(mosaic), origin="upper")
+    route_x, route_y = to_px(lon, lat)
+    ax.plot(route_x, route_y, color="#1d4ed8", lw=2.4, zorder=3, solid_capstyle="round")
+    for start, end in exclusions or []:
+        seg = geometry_geo[(geometry_geo["chainage"] >= start) & (geometry_geo["chainage"] <= end)]
+        if not seg.empty:
+            sx, sy = to_px(seg["lon"].to_numpy(dtype=float), seg["lat"].to_numpy(dtype=float))
+            ax.plot(sx, sy, color="#dc2626", lw=3.4, zorder=4, solid_capstyle="round")
+    sx, sy = to_px(lon[0], lat[0])
+    ex, ey = to_px(lon[-1], lat[-1])
+    ax.scatter([sx], [sy], s=70, color="#16a34a", edgecolor="white", linewidth=1.2, zorder=5, label="Start")
+    ax.scatter([ex], [ey], s=70, color="#dc2626", edgecolor="white", linewidth=1.2, zorder=5, label="End")
+    bx0, by0 = to_px(lon_min, lat_max)
+    bx1, by1 = to_px(lon_max, lat_min)
+    ax.set_xlim(bx0, bx1)
+    ax.set_ylim(by1, by0)
+    ax.axis("off")
+    ax.legend(loc="upper right", fontsize=7, framealpha=0.9)
+    ax.text(
+        0.995,
+        0.01,
+        "(c) OpenStreetMap contributors",
+        transform=ax.transAxes,
+        ha="right",
+        va="bottom",
+        fontsize=5,
+        color="#374151",
+        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.7),
+    )
+    return _fig_to_png_bytes(fig)
+
+
+def _plain_route_map_png(geometry_geo: pd.DataFrame, exclusions: list[tuple[float, float]]):
+    plt = _load_pyplot()
+    lon = geometry_geo["lon"].to_numpy(dtype=float)
+    lat = geometry_geo["lat"].to_numpy(dtype=float)
+    fig, ax = plt.subplots(figsize=(7.1, 4.3))
+    ax.plot(lon, lat, color="#1d4ed8", lw=2.0, zorder=3, label="Route")
+    for start, end in exclusions or []:
+        seg = geometry_geo[(geometry_geo["chainage"] >= start) & (geometry_geo["chainage"] <= end)]
+        if not seg.empty:
+            ax.plot(seg["lon"], seg["lat"], color="#dc2626", lw=3.0, zorder=4)
+    ax.scatter([lon[0]], [lat[0]], s=55, color="#16a34a", edgecolor="white", linewidth=1.0, zorder=5, label="Start")
+    ax.scatter([lon[-1]], [lat[-1]], s=55, color="#dc2626", edgecolor="white", linewidth=1.0, zorder=5, label="End")
+    ax.set_xlabel("Longitude", fontsize=8)
+    ax.set_ylabel("Latitude", fontsize=8)
+    ax.tick_params(labelsize=7)
+    mean_lat = float(np.nanmean(lat)) if lat.size else 51.0
+    ax.set_aspect(1.0 / max(np.cos(np.radians(mean_lat)), 0.1))
+    ax.grid(True, color="#e5e7eb", lw=0.5)
+    ax.legend(loc="best", fontsize=7)
+    ax.set_title("Survey route", fontsize=9)
+    return _fig_to_png_bytes(fig)
+
+
+def _route_map_png(geometry_geo: pd.DataFrame, exclusions: list[tuple[float, float]]):
+    if geometry_geo.empty or not {"lat", "lon", "chainage"}.issubset(geometry_geo.columns):
+        return None
+    if geometry_geo[["lat", "lon"]].dropna().empty:
+        return None
+    try:
+        result = _osm_route_map_png(geometry_geo, exclusions)
+        if result is not None:
+            return result
+    except Exception:
+        pass
+    try:
+        return _plain_route_map_png(geometry_geo, exclusions)
+    except Exception:
+        return None
+
+
+def _png_flowable(png_bytes: bytes, max_width_mm: float):
+    from reportlab.lib.units import mm
+    from reportlab.platypus import Image as RLImage
+    from PIL import Image as PILImage
+
+    with PILImage.open(BytesIO(png_bytes)) as pil_image:
+        width_px, height_px = pil_image.size
+    width = max_width_mm * mm
+    height = width * height_px / width_px
+    flowable = RLImage(BytesIO(png_bytes), width=width, height=height)
+    flowable.hAlign = "CENTER"
+    return flowable
+
+
 def _pdf_report_bytes(
     survey,
     ride_spec_name: str,
@@ -166,12 +388,20 @@ def _pdf_report_bytes(
     ride_status: str,
     mpd_status: str,
     overall_status: str,
+    geometry_geo: pd.DataFrame | None = None,
+    ride_tracks: list[str] | None = None,
+    mpd_lines: list[str] | None = None,
 ) -> bytes:
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import mm
     from reportlab.platypus import Image, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    if geometry_geo is None:
+        geometry_geo = _geometry_with_latlon(survey.geometry)
+    ride_tracks = ride_tracks or _ukri_track_columns(survey.ride_10m)
+    mpd_lines = mpd_lines or _mpd_line_options(survey.mpd_10m)
 
     buffer = BytesIO()
     doc = SimpleDocTemplate(
@@ -212,14 +442,24 @@ def _pdf_report_bytes(
     status_table.setStyle(
         TableStyle(
             [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#262730")),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f2937")),
                 ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
                 ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, 0), 10),
+                ("FONTNAME", (0, 1), (-1, 1), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 1), (-1, 1), 12),
                 ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-                ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#9ca3af")),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("TOPPADDING", (0, 0), (-1, -1), 7),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+                ("BOX", (0, 0), (-1, -1), 0.8, colors.HexColor("#9ca3af")),
+                ("INNERGRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#d1d5db")),
                 ("BACKGROUND", (0, 1), (0, 1), colors.HexColor("#dcfce7" if overall_status == "PASS" else "#fee2e2" if overall_status == "FAIL" else "#f3f4f6")),
                 ("BACKGROUND", (1, 1), (1, 1), colors.HexColor("#dcfce7" if ride_status == "PASS" else "#fee2e2" if ride_status == "FAIL" else "#f3f4f6")),
                 ("BACKGROUND", (2, 1), (2, 1), colors.HexColor("#dcfce7" if mpd_status == "PASS" else "#fee2e2" if mpd_status == "FAIL" else "#f3f4f6")),
+                ("TEXTCOLOR", (0, 1), (0, 1), colors.HexColor("#14532d" if overall_status == "PASS" else "#7f1d1d" if overall_status == "FAIL" else "#374151")),
+                ("TEXTCOLOR", (1, 1), (1, 1), colors.HexColor("#14532d" if ride_status == "PASS" else "#7f1d1d" if ride_status == "FAIL" else "#374151")),
+                ("TEXTCOLOR", (2, 1), (2, 1), colors.HexColor("#14532d" if mpd_status == "PASS" else "#7f1d1d" if mpd_status == "FAIL" else "#374151")),
             ]
         )
     )
@@ -240,17 +480,23 @@ def _pdf_report_bytes(
     ]
     metadata_rows.extend(_survey_endpoint_rows(survey))
     meta_table = Table(metadata_rows, colWidths=[48 * mm, 118 * mm])
-    meta_table.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#f3f4f6")),
-                ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
-                ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#d1d5db")),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("FONTSIZE", (0, 0), (-1, -1), 9),
-            ]
-        )
-    )
+    meta_style = [
+        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#1f2937")),
+        ("TEXTCOLOR", (0, 0), (0, -1), colors.white),
+        ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+        ("BOX", (0, 0), (-1, -1), 0.8, colors.HexColor("#9ca3af")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#d1d5db")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+    ]
+    for row_index in range(len(metadata_rows)):
+        if row_index % 2 == 1:
+            meta_style.append(("BACKGROUND", (1, row_index), (1, row_index), colors.HexColor("#f9fafb")))
+    meta_table.setStyle(TableStyle(meta_style))
     story.extend([Paragraph("Survey Summary", styles["Heading2"]), meta_table, Spacer(1, 8)])
 
     story.append(Paragraph("Specification", styles["Heading2"]))
@@ -279,21 +525,48 @@ def _pdf_report_bytes(
         exclusion_rows = [["Start m", "End m"]] + [[f"{start:,.1f}", f"{end:,.1f}"] for start, end in exclusions[:20]]
         if len(exclusions) > 20:
             exclusion_rows.append(["...", f"{len(exclusions) - 20} more"])
-        exclusion_table = Table(exclusion_rows, colWidths=[40 * mm, 40 * mm])
-        exclusion_table.setStyle(
-            TableStyle(
-                [
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#262730")),
-                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                    ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#d1d5db")),
-                    ("FONTSIZE", (0, 0), (-1, -1), 8),
-                ]
-            )
-        )
+        exclusion_table = Table(exclusion_rows, colWidths=[45 * mm, 45 * mm])
+        exclusion_style = [
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f2937")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("BOX", (0, 0), (-1, -1), 0.8, colors.HexColor("#9ca3af")),
+            ("INNERGRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#d1d5db")),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]
+        for row_index in range(1, len(exclusion_rows)):
+            if row_index % 2 == 0:
+                exclusion_style.append(("BACKGROUND", (0, row_index), (-1, row_index), colors.HexColor("#f9fafb")))
+        exclusion_table.setStyle(TableStyle(exclusion_style))
         story.append(exclusion_table)
 
-    def add_result_table(title: str, df: pd.DataFrame, columns: list[str], max_rows: int = 60):
+    map_png = _route_map_png(geometry_geo, exclusions)
+    if map_png is not None:
+        story.extend(
+            [
+                Spacer(1, 10),
+                Paragraph("Survey Location", styles["Heading2"]),
+                _png_flowable(map_png, 172),
+                Paragraph(
+                    "Blue trace shows the surveyed route; red segments mark excluded regions.",
+                    styles["Small"],
+                ),
+            ]
+        )
+
+    def add_result_table(
+        title: str,
+        df: pd.DataFrame,
+        columns: list[str],
+        max_rows: int = 60,
+        chart_png: bytes | None = None,
+    ):
         story.extend([PageBreak(), Paragraph(title, styles["Heading2"])])
+        if chart_png is not None:
+            story.extend([_png_flowable(chart_png, 176), Spacer(1, 6)])
         if df.empty:
             story.append(Paragraph("No assessable data found.", styles["BodyText"]))
             return
@@ -303,18 +576,34 @@ def _pdf_report_bytes(
         rows = [[Paragraph(escape(col), styles["SmallHeader"]) for col in columns]]
         for _, row in shown.iterrows():
             rows.append([Paragraph(escape(_report_text(row.get(col))), styles["Small"]) for col in columns])
-        widths = [25 * mm] * len(columns)
+        available_width = doc.width
+        widths = [available_width / len(columns)] * len(columns)
         result_table = Table(rows, colWidths=widths, repeatRows=1)
-        result_table.setStyle(
-            TableStyle(
-                [
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#262730")),
-                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                    ("GRID", (0, 0), (-1, -1), 0.2, colors.HexColor("#d1d5db")),
-                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ]
-            )
-        )
+        table_style = [
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f2937")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("BOX", (0, 0), (-1, -1), 0.8, colors.HexColor("#9ca3af")),
+            ("INNERGRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#d1d5db")),
+            ("LINEBELOW", (0, 0), (-1, 0), 0.8, colors.HexColor("#111827")),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ("LEFTPADDING", (0, 0), (-1, -1), 5),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ]
+        for row_index in range(1, len(rows)):
+            if row_index % 2 == 0:
+                table_style.append(("BACKGROUND", (0, row_index), (-1, row_index), colors.HexColor("#f3f4f6")))
+        if "status" in columns:
+            status_col = columns.index("status")
+            for offset, (_, row) in enumerate(shown.iterrows(), start=1):
+                status_value = _report_text(row.get("status"))
+                cell_bg = "#dcfce7" if status_value == "PASS" else "#fee2e2" if status_value == "FAIL" else None
+                if cell_bg:
+                    table_style.append(
+                        ("BACKGROUND", (status_col, offset), (status_col, offset), colors.HexColor(cell_bg))
+                    )
+        result_table.setStyle(TableStyle(table_style))
         caption = "Failed sections are shown below." if not fail_df.empty else "No failed sections; first assessed rows are shown below."
         if len(table_df) > max_rows:
             caption += f" Showing first {max_rows:,} of {len(table_df):,} rows."
@@ -322,10 +611,22 @@ def _pdf_report_bytes(
 
     ride_cols = [c for c in ["metric", "tracks", "section", "valid_10m_values", "max_ri", "pct_below_lower_limit", "status"] if c in ride_results.columns]
     mpd_cols = [c for c in ["metric", "tracks", "section", "valid_10m_values", "expected_10m_values", "valid_pct", "avg_mpd_mm", "std_mpd_mm", "status"] if c in mpd_results.columns]
-    add_result_table("UKRI Assessment Detail", ride_results, ride_cols)
-    add_result_table("MPD Assessment Detail", mpd_results, mpd_cols)
+    ride_chart = _ride_chart_png(survey.ride_10m, ride_tracks, ride_spec, exclusions)
+    mpd_chart = _mpd_chart_png(survey.mpd_10m, mpd_lines, mpd_spec, exclusions)
+    add_result_table("UKRI Assessment Detail", ride_results, ride_cols, chart_png=ride_chart)
+    add_result_table("MPD Assessment Detail", mpd_results, mpd_cols, chart_png=mpd_chart)
 
-    doc.build(story)
+    def _draw_footer(canvas, current_doc):
+        canvas.saveState()
+        canvas.setStrokeColor(colors.HexColor("#e5e7eb"))
+        canvas.line(14 * mm, 11 * mm, A4[0] - 14 * mm, 11 * mm)
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(colors.HexColor("#6b7280"))
+        canvas.drawString(14 * mm, 8 * mm, "National Highways Ride and MPD Evaluation Report")
+        canvas.drawRightString(A4[0] - 14 * mm, 8 * mm, f"Page {current_doc.page}")
+        canvas.restoreState()
+
+    doc.build(story, onFirstPage=_draw_footer, onLaterPages=_draw_footer)
     return buffer.getvalue()
 
 
@@ -864,6 +1165,9 @@ with tab_summary:
                     ride_status,
                     mpd_status,
                     overall_status,
+                    geometry_geo,
+                    selected_ukri_tracks,
+                    selected_mpd_lines,
                 ),
                 file_name=f"{safe_report_name}_report.pdf",
                 mime="application/pdf",
