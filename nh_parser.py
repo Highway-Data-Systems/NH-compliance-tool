@@ -9,7 +9,8 @@ import numpy as np
 import pandas as pd
 
 
-PARSER_VERSION = "2026-07-20-ride-calc-v4"
+PARSER_VERSION = "2026-08-11-bcd-ukri-elvp-exclusion-v6"
+MAX_REASONABLE_RI = 100.0
 FLOAT_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
 DATETIME_RE = re.compile(r"\d{1,2}-[A-Za-z]{3}-\d{4}\s*\d{1,2}:\d{2}")
 MPD_RE = re.compile(
@@ -100,7 +101,7 @@ def parse_bcd(text: str, name: str = "") -> ParsedSurvey:
             geometry_rows.append(
                 {"chainage": nums[0], "x": nums[1], "y": nums[2], "z": nums[3]}
             )
-        elif len(nums) == 7:
+        elif _looks_like_bcd_ride_row(line, nums):
             mode = "ride"
             ns_ri = _roughness_index(nums[1], nums[2])
             os_ri = _roughness_index(nums[4], nums[5])
@@ -110,23 +111,25 @@ def parse_bcd(text: str, name: str = "") -> ParsedSurvey:
                     "ns_elpv3": nums[1],
                     "ns_elpv10": nums[2],
                     "ns_ri": ns_ri,
-                    "ns_code": nums[3],
+                    "ns_quality_code": nums[3],
                     "os_elpv3": nums[4],
                     "os_elpv10": nums[5],
                     "os_ri": os_ri,
-                    "os_code": nums[6],
+                    "os_quality_code": nums[6],
                 }
             )
 
     ride_df = _add_grouped_ride_columns(pd.DataFrame(ride_rows))
+    mpd_df = pd.DataFrame(mpd_rows)
+    events = _bcd_exclusion_events(lines, ride_df, mpd_df)
     return ParsedSurvey(
         file_type="BCD",
         metadata=metadata,
         quality_limits=pd.DataFrame(quality_rows),
         geometry=pd.DataFrame(geometry_rows),
         ride_10m=ride_df,
-        mpd_10m=pd.DataFrame(mpd_rows),
-        events=pd.DataFrame(),
+        mpd_10m=mpd_df,
+        events=events,
     )
 
 
@@ -313,7 +316,7 @@ def evaluate_ride(
     if ride_df.empty or metric_column not in ride_df.columns:
         return pd.DataFrame()
     df = ride_df[["chainage", metric_column]].rename(columns={metric_column: "ri"})
-    df = df[(df["ri"] > 0.001) & df["ri"].notna()].copy()
+    df = df[(df["ri"] > 0.001) & (df["ri"] <= MAX_REASONABLE_RI) & df["ri"].notna()].copy()
     df = _apply_exclusions(df, exclusions or [], 10.0)
     if df.empty:
         return pd.DataFrame()
@@ -369,7 +372,7 @@ def evaluate_ride_combined(
         track_df["track"] = column
         frames.append(track_df)
     df = pd.concat(frames, ignore_index=True)
-    df = df[(df["ri"] > 0.001) & df["ri"].notna()].copy()
+    df = df[(df["ri"] > 0.001) & (df["ri"] <= MAX_REASONABLE_RI) & df["ri"].notna()].copy()
     df = _apply_exclusions(df, exclusions or [], 10.0)
     if df.empty:
         return pd.DataFrame()
@@ -513,6 +516,50 @@ def dataframe_to_csv(df: pd.DataFrame) -> bytes:
 
 def _floats(line: str) -> list[float]:
     return [float(x) for x in FLOAT_RE.findall(line)]
+
+
+def _looks_like_bcd_ride_row(line: str, nums: list[float]) -> bool:
+    return len(nums) == 7 and bool(re.match(r"^\s*\d+(?:\.\d+)?\s+", line))
+
+
+def _bcd_exclusion_events(lines: list[str], ride_df: pd.DataFrame, mpd_df: pd.DataFrame) -> pd.DataFrame:
+    intervals = []
+    for line in lines:
+        if "S-EXCLUDE" not in line.upper():
+            continue
+        nums = _floats(line)
+        if len(nums) >= 2:
+            start, end = nums[-2], nums[-1]
+            if end > start:
+                intervals.append((start, end, "BCD S-EXCLUDE"))
+
+    for source, df in [("BCD ride gap", ride_df), ("BCD MPD gap", mpd_df)]:
+        if df.empty or "chainage" not in df.columns:
+            continue
+        chainages = df["chainage"].dropna().drop_duplicates().sort_values().reset_index(drop=True)
+        for idx in range(1, len(chainages)):
+            previous = float(chainages.iloc[idx - 1])
+            current = float(chainages.iloc[idx])
+            if current - previous > 15.0:
+                start = previous + 10.0
+                end = current
+                if end > start:
+                    intervals.append((start, end, source))
+
+    deduped = []
+    seen = set()
+    for start, end, source in intervals:
+        key = (round(float(start), 3), round(float(end), 3))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.extend(
+            [
+                {"event": "S-Exclude", "chainage": float(start), "source": source},
+                {"event": "E-Exclude", "chainage": float(end), "source": source},
+            ]
+        )
+    return pd.DataFrame(deduped)
 
 
 def _extract_timestamps(text: str) -> list[str]:
@@ -690,6 +737,9 @@ def _add_grouped_ride_columns(ride_df: pd.DataFrame) -> pd.DataFrame:
     if ride_df.empty:
         return ride_df
     df = ride_df.copy()
+    for column in [col for col in df.columns if col.endswith("_ri")]:
+        df.loc[df[column] > MAX_REASONABLE_RI, column] = np.nan
+
     if "ns_ri" in df.columns:
         df["left_ri"] = df["ns_ri"]
 
