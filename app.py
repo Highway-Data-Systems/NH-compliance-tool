@@ -396,7 +396,7 @@ def _pdf_report_bytes(
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import mm
-    from reportlab.platypus import Image, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    from reportlab.platypus import KeepTogether, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
     if geometry_geo is None:
         geometry_geo = _geometry_with_latlon(survey.geometry)
@@ -409,8 +409,8 @@ def _pdf_report_bytes(
         pagesize=A4,
         rightMargin=14 * mm,
         leftMargin=14 * mm,
-        topMargin=12 * mm,
-        bottomMargin=12 * mm,
+        topMargin=22 * mm,
+        bottomMargin=14 * mm,
         title="National Highways Ride and MPD Evaluation Report",
     )
     styles = getSampleStyleSheet()
@@ -426,11 +426,6 @@ def _pdf_report_bytes(
     styles.add(ParagraphStyle(name="Status", parent=styles["BodyText"], fontSize=10, leading=12, alignment=1))
 
     story = []
-    if HDS_LOGO_LIGHT.exists():
-        logo = Image(str(HDS_LOGO_LIGHT), width=42 * mm, height=42 * mm * 179 / 600)
-        logo.hAlign = "LEFT"
-        story.extend([logo, Spacer(1, 5)])
-
     survey_name = survey.metadata.get("survey") or survey.metadata.get("file_name") or "Loaded survey"
     story.append(Paragraph("National Highways Ride and MPD Evaluation Report", styles["Title"]))
     story.append(Paragraph(escape(str(survey_name)), styles["Heading2"]))
@@ -545,16 +540,18 @@ def _pdf_report_bytes(
 
     map_png = _route_map_png(geometry_geo, exclusions)
     if map_png is not None:
-        story.extend(
-            [
-                Spacer(1, 10),
-                Paragraph("Survey Location", styles["Heading2"]),
-                _png_flowable(map_png, 172),
-                Paragraph(
-                    "Blue trace shows the surveyed route; red segments mark excluded regions.",
-                    styles["Small"],
-                ),
-            ]
+        story.append(Spacer(1, 10))
+        story.append(
+            KeepTogether(
+                [
+                    Paragraph("Survey Location", styles["Heading2"]),
+                    _png_flowable(map_png, 172),
+                    Paragraph(
+                        "Blue trace shows the surveyed route; red segments mark excluded regions.",
+                        styles["Small"],
+                    ),
+                ]
+            )
         )
 
     def add_result_table(
@@ -616,8 +613,20 @@ def _pdf_report_bytes(
     add_result_table("UKRI Assessment Detail", ride_results, ride_cols, chart_png=ride_chart)
     add_result_table("MPD Assessment Detail", mpd_results, mpd_cols, chart_png=mpd_chart)
 
-    def _draw_footer(canvas, current_doc):
+    def _draw_page_furniture(canvas, current_doc):
         canvas.saveState()
+        if HDS_LOGO_LIGHT.exists():
+            logo_width = 30 * mm
+            logo_height = logo_width * 179 / 600
+            canvas.drawImage(
+                str(HDS_LOGO_LIGHT),
+                A4[0] - 14 * mm - logo_width,
+                A4[1] - 10 * mm - logo_height,
+                width=logo_width,
+                height=logo_height,
+                mask="auto",
+                preserveAspectRatio=True,
+            )
         canvas.setStrokeColor(colors.HexColor("#e5e7eb"))
         canvas.line(14 * mm, 11 * mm, A4[0] - 14 * mm, 11 * mm)
         canvas.setFont("Helvetica", 7)
@@ -626,7 +635,7 @@ def _pdf_report_bytes(
         canvas.drawRightString(A4[0] - 14 * mm, 8 * mm, f"Page {current_doc.page}")
         canvas.restoreState()
 
-    doc.build(story, onFirstPage=_draw_footer, onLaterPages=_draw_footer)
+    doc.build(story, onFirstPage=_draw_page_furniture, onLaterPages=_draw_page_furniture)
     return buffer.getvalue()
 
 
