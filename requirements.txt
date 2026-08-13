@@ -5,3 +5,5 @@ plotly
 pydeck
 pyproj
 reportlab
+matplotlib
+pillow
