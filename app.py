@@ -163,9 +163,10 @@ def _load_pyplot():
     return plt
 
 
-def _fig_to_png_bytes(fig, dpi: int = 150) -> bytes:
+def _fig_to_png_bytes(fig, dpi: int = 150, tight: bool = True) -> bytes:
     buffer = BytesIO()
-    fig.savefig(buffer, format="png", dpi=dpi, bbox_inches="tight", facecolor="white")
+    bbox_inches = "tight" if tight else None
+    fig.savefig(buffer, format="png", dpi=dpi, bbox_inches=bbox_inches, facecolor="white")
     import matplotlib.pyplot as plt
 
     plt.close(fig)
@@ -241,6 +242,31 @@ def _deg2num(lon_deg, lat_deg, zoom: int):
     return xt, yt
 
 
+def _expand_geo_bounds_to_aspect(
+    lon_min: float,
+    lon_max: float,
+    lat_min: float,
+    lat_max: float,
+    aspect: float,
+) -> tuple[float, float, float, float]:
+    mean_lat = float(np.nanmean([lat_min, lat_max]))
+    lon_scale = max(np.cos(np.radians(mean_lat)), 0.1)
+    lon_span = max(lon_max - lon_min, 0.000001)
+    lat_span = max(lat_max - lat_min, 0.000001)
+    projected_aspect = (lon_span * lon_scale) / lat_span
+    if projected_aspect < aspect:
+        target_lon_span = aspect * lat_span / lon_scale
+        extra = (target_lon_span - lon_span) / 2
+        lon_min -= extra
+        lon_max += extra
+    elif projected_aspect > aspect:
+        target_lat_span = lon_span * lon_scale / aspect
+        extra = (target_lat_span - lat_span) / 2
+        lat_min -= extra
+        lat_max += extra
+    return lon_min, lon_max, lat_min, lat_max
+
+
 def _osm_route_map_png(geometry_geo: pd.DataFrame, exclusions: list[tuple[float, float]]):
     import urllib.request
     from PIL import Image
@@ -255,6 +281,13 @@ def _osm_route_map_png(geometry_geo: pd.DataFrame, exclusions: list[tuple[float,
     lat_max += pad_lat
     lon_min -= pad_lon
     lon_max += pad_lon
+    lon_min, lon_max, lat_min, lat_max = _expand_geo_bounds_to_aspect(
+        lon_min,
+        lon_max,
+        lat_min,
+        lat_max,
+        7.1 / 4.3,
+    )
 
     zoom = 12
     for candidate in range(17, 4, -1):
@@ -319,7 +352,7 @@ def _osm_route_map_png(geometry_geo: pd.DataFrame, exclusions: list[tuple[float,
         color="#374151",
         bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.7),
     )
-    return _fig_to_png_bytes(fig)
+    return _fig_to_png_bytes(fig, tight=False)
 
 
 def _plain_route_map_png(geometry_geo: pd.DataFrame, exclusions: list[tuple[float, float]]):
@@ -338,11 +371,24 @@ def _plain_route_map_png(geometry_geo: pd.DataFrame, exclusions: list[tuple[floa
     ax.set_ylabel("Latitude", fontsize=8)
     ax.tick_params(labelsize=7)
     mean_lat = float(np.nanmean(lat)) if lat.size else 51.0
+    lat_min, lat_max = float(np.nanmin(lat)), float(np.nanmax(lat))
+    lon_min, lon_max = float(np.nanmin(lon)), float(np.nanmax(lon))
+    pad_lat = max((lat_max - lat_min) * 0.18, 0.0025)
+    pad_lon = max((lon_max - lon_min) * 0.18, 0.0025)
+    lon_min, lon_max, lat_min, lat_max = _expand_geo_bounds_to_aspect(
+        lon_min - pad_lon,
+        lon_max + pad_lon,
+        lat_min - pad_lat,
+        lat_max + pad_lat,
+        7.1 / 4.3,
+    )
+    ax.set_xlim(lon_min, lon_max)
+    ax.set_ylim(lat_min, lat_max)
     ax.set_aspect(1.0 / max(np.cos(np.radians(mean_lat)), 0.1))
     ax.grid(True, color="#e5e7eb", lw=0.5)
     ax.legend(loc="best", fontsize=7)
     ax.set_title("Survey route", fontsize=9)
-    return _fig_to_png_bytes(fig)
+    return _fig_to_png_bytes(fig, tight=False)
 
 
 def _route_map_png(geometry_geo: pd.DataFrame, exclusions: list[tuple[float, float]]):
