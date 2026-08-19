@@ -362,15 +362,21 @@ def _route_map_png(geometry_geo: pd.DataFrame, exclusions: list[tuple[float, flo
         return None
 
 
-def _png_flowable(png_bytes: bytes, max_width_mm: float):
+def _png_flowable(png_bytes: bytes, max_width_mm: float, max_height_mm: float = 180):
     from reportlab.lib.units import mm
     from reportlab.platypus import Image as RLImage
     from PIL import Image as PILImage
 
     with PILImage.open(BytesIO(png_bytes)) as pil_image:
         width_px, height_px = pil_image.size
-    width = max_width_mm * mm
-    height = width * height_px / width_px
+    if width_px <= 0 or height_px <= 0:
+        raise ValueError("Cannot add an image with invalid dimensions to the PDF report.")
+
+    max_width = max_width_mm * mm
+    max_height = max_height_mm * mm
+    scale = min(max_width / width_px, max_height / height_px)
+    width = width_px * scale
+    height = height_px * scale
     flowable = RLImage(BytesIO(png_bytes), width=width, height=height)
     flowable.hAlign = "CENTER"
     return flowable
