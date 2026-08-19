@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 
-PARSER_VERSION = "2026-08-11-bcd-ukri-elvp-exclusion-v6"
+PARSER_VERSION = "2026-08-19-bcd-ukri-elvp-edge-padding-v7"
 MAX_REASONABLE_RI = 100.0
 FLOAT_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
 DATETIME_RE = re.compile(r"\d{1,2}-[A-Za-z]{3}-\d{4}\s*\d{1,2}:\d{2}")
@@ -714,8 +714,8 @@ def _derive_ride_from_profiles(
     for line_index, profile in enumerate(profiles, 1):
         offset = offsets[line_index - 1] if line_index <= len(offsets) else np.nan
         label = _line_label(line_index, offset).lower()
-        filtered_3m = np.convolve(profile, hp_3m, mode="same")
-        filtered_10m = np.convolve(profile, hp_10m, mode="same")
+        filtered_3m = _convolve_same_edge_padded(profile, hp_3m)
+        filtered_10m = _convolve_same_edge_padded(profile, hp_10m)
         points_per_10m = max(1, int(round(10.0 / lp_interval)))
         for start in range(0, len(profile), points_per_10m):
             seg3 = filtered_3m[start : start + points_per_10m]
@@ -763,6 +763,15 @@ def _high_pass_coefficients(frequency: float, delta: float, order: int = 3) -> n
     high_pass = -low_pass
     high_pass[i == 0] = 1 - low_pass[i == 0]
     return high_pass
+
+
+def _convolve_same_edge_padded(values: np.ndarray, kernel: np.ndarray) -> np.ndarray:
+    if values.size == 0:
+        return values
+    left_pad = len(kernel) // 2
+    right_pad = len(kernel) - 1 - left_pad
+    padded = np.pad(values, (left_pad, right_pad), mode="edge")
+    return np.convolve(padded, kernel, mode="valid")
 
 
 def _roughness_index(elpv3: float, elpv10: float) -> float:
