@@ -246,21 +246,25 @@ def _comparison_chart_png(
         return None
     plt = _load_pyplot()
     fig, ax = plt.subplots(figsize=(7.3, 2.9))
-    if not primary.empty and metric in primary.columns:
-        ax.plot(
-            primary["chainage"].to_numpy(dtype=float),
-            primary[metric].to_numpy(dtype=float),
-            color="#1d4ed8",
-            lw=1.0,
-            label="Primary",
-        )
     if not comparison.empty and metric in comparison.columns:
         ax.plot(
             comparison["chainage"].to_numpy(dtype=float),
             comparison[metric].to_numpy(dtype=float),
             color="#dc2626",
             lw=1.0,
-            label="Comparison",
+            alpha=0.75,
+            zorder=2,
+            label="Comparison/Pre",
+        )
+    if not primary.empty and metric in primary.columns:
+        ax.plot(
+            primary["chainage"].to_numpy(dtype=float),
+            primary[metric].to_numpy(dtype=float),
+            color="#1d4ed8",
+            lw=1.0,
+            alpha=0.75,
+            zorder=3,
+            label="Primary",
         )
     for start, end in exclusions or []:
         ax.axvspan(start, end, color="#6b7280", alpha=0.20, zorder=0)
@@ -766,7 +770,10 @@ def _pdf_comparison_report_bytes(
     )
 
     def make_table(rows, widths=None, font_size=8):
-        table_rows = [[Paragraph(escape(_report_text(cell)), styles["Small"]) for cell in row] for row in rows]
+        table_rows = []
+        for row_index, row in enumerate(rows):
+            style = styles["SmallHeader"] if row_index == 0 else styles["Small"]
+            table_rows.append([Paragraph(escape(_report_text(cell)), style) for cell in row])
         table = Table(table_rows, colWidths=widths, repeatRows=1)
         style = [
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f2937")),
@@ -787,10 +794,8 @@ def _pdf_comparison_report_bytes(
         table.setStyle(TableStyle(style))
         return table
 
-    def add_delta_section(title, delta_df, columns, chart_png=None, units=""):
+    def add_delta_section(title, delta_df, columns, units=""):
         story.extend([PageBreak(), Paragraph(title, styles["Heading2"])])
-        if chart_png is not None:
-            story.extend([_png_flowable(chart_png, 176, 90), Spacer(1, 6)])
         if delta_df.empty:
             story.append(Paragraph("No matched comparison points were found.", styles["BodyText"]))
             return
@@ -811,15 +816,15 @@ def _pdf_comparison_report_bytes(
             story.append(Paragraph(f"Showing first {len(shown):,} of {len(delta_df):,} matched points.", styles["Small"]))
 
     primary_name = primary.metadata.get("survey") or primary.metadata.get("file_name") or "Primary survey"
-    comparison_name = comparison.metadata.get("survey") or comparison.metadata.get("file_name") or "Comparison survey"
+    comparison_name = comparison.metadata.get("survey") or comparison.metadata.get("file_name") or "Comparison/Pre survey"
     comp_ride = _apply_chainage_offset(comparison.ride_10m, offset_m)
     comp_mpd = _apply_chainage_offset(comparison.mpd_10m, offset_m)
     primary_ukri = _combined_ukri_chart_data(primary.ride_10m, ride_tracks)
     comparison_ukri = _combined_ukri_chart_data(comp_ride, ride_tracks)
     primary_mpd = _combined_mpd_chart_data(primary.mpd_10m, mpd_lines)
     comparison_mpd = _combined_mpd_chart_data(comp_mpd, mpd_lines)
-    ukri_delta = _comparison_delta(primary_ukri, comparison_ukri, "combined_ukri", "primary_ukri", "comparison_ukri")
-    mpd_delta = _comparison_delta(primary_mpd, comparison_mpd, "combined_mpd_mm", "primary_mpd_mm", "comparison_mpd_mm")
+    ukri_delta = _comparison_delta(primary_ukri, comparison_ukri, "combined_ukri", "primary_ukri", "comparison_pre_ukri")
+    mpd_delta = _comparison_delta(primary_mpd, comparison_mpd, "combined_mpd_mm", "primary_mpd_mm", "comparison_pre_mpd_mm")
 
     story = [
         Paragraph("National Highways Comparison Report", styles["Title"]),
@@ -828,7 +833,7 @@ def _pdf_comparison_report_bytes(
         Spacer(1, 8),
     ]
     overview_rows = [
-        ["Measure", "Primary", "Comparison"],
+        ["Measure", "Primary", "Comparison/Pre"],
         ["File type", primary.file_type, comparison.file_type],
         ["Survey date", primary.metadata.get("survey_date", "-"), comparison.metadata.get("survey_date", "-")],
         ["Length", _format_m(primary.metadata.get("survey_length_m")), _format_m(comparison.metadata.get("survey_length_m"))],
@@ -840,7 +845,7 @@ def _pdf_comparison_report_bytes(
 
     check_rows = _route_location_checks(primary, comparison)
     if check_rows:
-        rows = [["Check", "Primary", "Comparison", "Difference", "Status"]]
+        rows = [["Check", "Primary", "Comparison/Pre", "Difference", "Status"]]
         rows.extend([[row["check"], row["primary"], row["comparison"], row["difference"], row["status"]] for row in check_rows])
         story.extend([Paragraph("Route Checks", styles["Heading2"]), make_table(rows, [42 * mm, 38 * mm, 38 * mm, 30 * mm, 18 * mm]), Spacer(1, 8)])
 
@@ -864,19 +869,24 @@ def _pdf_comparison_report_bytes(
     story.extend([Paragraph("Comparison Summary", styles["Heading2"]), make_table(matched_rows, [26 * mm, 64 * mm, 28 * mm, 24 * mm, 24 * mm])])
 
     ukri_chart = _comparison_chart_png(primary_ukri, comparison_ukri, "combined_ukri", "UKRI", "Combined UKRI Comparison", exclusions)
+    mpd_chart = _comparison_chart_png(primary_mpd, comparison_mpd, "combined_mpd_mm", "MPD (mm)", "Combined MPD Comparison", exclusions)
+    if ukri_chart is not None or mpd_chart is not None:
+        story.extend([Spacer(1, 10), Paragraph("Comparison Charts", styles["Heading2"])])
+        if ukri_chart is not None:
+            story.extend([_png_flowable(ukri_chart, 176, 82), Spacer(1, 6)])
+        if mpd_chart is not None:
+            story.extend([_png_flowable(mpd_chart, 176, 82), Spacer(1, 6)])
+
     add_delta_section(
         "UKRI Comparison Detail",
         ukri_delta,
-        ["chainage", "primary_ukri", "comparison_ukri", "delta"],
-        chart_png=ukri_chart,
+        ["chainage", "primary_ukri", "comparison_pre_ukri", "delta"],
     )
 
-    mpd_chart = _comparison_chart_png(primary_mpd, comparison_mpd, "combined_mpd_mm", "MPD (mm)", "Combined MPD Comparison", exclusions)
     add_delta_section(
         "MPD Comparison Detail",
         mpd_delta,
-        ["chainage", "primary_mpd_mm", "comparison_mpd_mm", "delta"],
-        chart_png=mpd_chart,
+        ["chainage", "primary_mpd_mm", "comparison_pre_mpd_mm", "delta"],
         units="mm",
     )
 
@@ -1802,8 +1812,8 @@ if tab_compare is not None:
             comparison_ukri = _combined_ukri_chart_data(comp_ride, common_ukri_tracks)
             comparison_chart = pd.concat(
                 [
+                    comparison_ukri.assign(dataset="Comparison/Pre"),
                     primary_ukri.assign(dataset="Primary"),
-                    comparison_ukri.assign(dataset="Comparison"),
                 ],
                 ignore_index=True,
             )
@@ -1817,6 +1827,7 @@ if tab_compare is not None:
                 )
                 for start, end in exclusions:
                     fig.add_vrect(x0=start, x1=end, fillcolor="rgba(239, 68, 68, 0.14)", line_width=0)
+                fig.update_traces(opacity=0.75)
                 fig.update_layout(height=360, margin=dict(l=10, r=10, t=45, b=10))
                 st.plotly_chart(fig, use_container_width=True)
 
@@ -1836,8 +1847,8 @@ if tab_compare is not None:
             comparison_mpd = _combined_mpd_chart_data(comp_mpd, common_mpd_lines)
             comparison_chart = pd.concat(
                 [
+                    comparison_mpd.assign(dataset="Comparison/Pre"),
                     primary_mpd.assign(dataset="Primary"),
-                    comparison_mpd.assign(dataset="Comparison"),
                 ],
                 ignore_index=True,
             )
@@ -1851,6 +1862,7 @@ if tab_compare is not None:
                 )
                 for start, end in exclusions:
                     fig.add_vrect(x0=start, x1=end, fillcolor="rgba(239, 68, 68, 0.14)", line_width=0)
+                fig.update_traces(opacity=0.75)
                 fig.update_layout(height=360, margin=dict(l=10, r=10, t=45, b=10))
                 st.plotly_chart(fig, use_container_width=True)
 
