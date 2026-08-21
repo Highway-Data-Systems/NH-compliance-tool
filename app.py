@@ -910,6 +910,85 @@ def _combined_mpd_chart_data(mpd_df: pd.DataFrame, line_columns: list[str] | Non
     )
 
 
+def _excluded_mask(chainage: pd.Series, exclusions: list[tuple[float, float]], length_m: float = 10.0) -> pd.Series:
+    if chainage.empty or not exclusions:
+        return pd.Series(False, index=chainage.index)
+    starts = chainage.to_numpy(dtype=float)
+    ends = starts + length_m
+    excluded = np.zeros(len(chainage), dtype=bool)
+    for start, end in exclusions:
+        excluded |= (starts < end) & (ends > start)
+    return pd.Series(excluded, index=chainage.index)
+
+
+def _ukri_10m_results(ride_df: pd.DataFrame, track_columns: list[str], exclusions: list[tuple[float, float]]) -> pd.DataFrame:
+    if ride_df.empty or not track_columns:
+        return pd.DataFrame()
+    existing_columns = [column for column in track_columns if column in ride_df.columns]
+    if not existing_columns:
+        return pd.DataFrame()
+    out = ride_df[["chainage"] + existing_columns].copy()
+    out[existing_columns] = out[existing_columns].replace(0, np.nan)
+    out["combined_ukri"] = out[existing_columns].mean(axis=1)
+    out["valid_track_values"] = out[existing_columns].count(axis=1)
+    out["tracks"] = ", ".join(existing_columns)
+    out["excluded"] = _excluded_mask(out["chainage"], exclusions)
+    out["section_start_300m"] = np.floor(out["chainage"] / 300.0) * 300.0
+    return out[
+        ["chainage", "section_start_300m", "excluded", "tracks", "valid_track_values", "combined_ukri"]
+        + existing_columns
+    ].sort_values("chainage")
+
+
+def _mpd_10m_results(mpd_df: pd.DataFrame, line_columns: list[str], exclusions: list[tuple[float, float]]) -> pd.DataFrame:
+    if mpd_df.empty:
+        return pd.DataFrame()
+    df = mpd_df.copy()
+    if line_columns and "line" in df.columns:
+        df = df[df["line"].isin(line_columns)]
+    df = df[df["mpd_mm"] > 0.001]
+    if df.empty:
+        return pd.DataFrame()
+    pivot = (
+        df.pivot_table(index="chainage", columns="line", values="mpd_mm", aggfunc="mean")
+        .reset_index()
+        .rename_axis(None, axis=1)
+    )
+    track_columns = [column for column in pivot.columns if column != "chainage"]
+    rename_map = {column: f"mpd_{column}_mm" for column in track_columns}
+    out = pivot.rename(columns=rename_map)
+    mpd_columns = list(rename_map.values())
+    out["combined_mpd_mm"] = out[mpd_columns].mean(axis=1)
+    out["valid_track_values"] = out[mpd_columns].count(axis=1)
+    out["tracks"] = ", ".join(track_columns)
+    out["excluded"] = _excluded_mask(out["chainage"], exclusions)
+    out["section_start_100m"] = np.floor(out["chainage"] / 100.0) * 100.0
+    return out[
+        ["chainage", "section_start_100m", "excluded", "tracks", "valid_track_values", "combined_mpd_mm"]
+        + mpd_columns
+    ].sort_values("chainage")
+
+
+def _csv_10m_bundle_bytes(
+    ride_df: pd.DataFrame,
+    ride_tracks: list[str],
+    mpd_df: pd.DataFrame,
+    mpd_lines: list[str],
+    exclusions: list[tuple[float, float]],
+) -> bytes:
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "combined_ukri_10m_results.csv",
+            nh_parser.dataframe_to_csv(_ukri_10m_results(ride_df, ride_tracks, exclusions)),
+        )
+        archive.writestr(
+            "combined_mpd_10m_results.csv",
+            nh_parser.dataframe_to_csv(_mpd_10m_results(mpd_df, mpd_lines, exclusions)),
+        )
+    return buffer.getvalue()
+
+
 def _endpoint_distance(summary_a: pd.DataFrame, summary_b: pd.DataFrame, index: int) -> float | None:
     if summary_a.empty or summary_b.empty or not {"x", "y"}.issubset(summary_a.columns) or not {"x", "y"}.issubset(summary_b.columns):
         return None
@@ -1210,7 +1289,7 @@ with tab_summary:
     try:
         report_name = survey.metadata.get("survey") or uploaded.name.rsplit(".", 1)[0]
         safe_report_name = _safe_filename(report_name, export_prefix)
-        export_col1, export_col2 = st.columns(2)
+        export_col1, export_col2, export_col3 = st.columns(3)
         with export_col1:
             st.download_button(
                 "Download PDF report",
@@ -1238,6 +1317,19 @@ with tab_summary:
                 "Download CSV results bundle",
                 data=_csv_bundle_bytes(summary_ride_results, summary_mpd_results),
                 file_name=f"{export_prefix}_combined_results.zip",
+                mime="application/zip",
+            )
+        with export_col3:
+            st.download_button(
+                "Download CSV results - 10m",
+                data=_csv_10m_bundle_bytes(
+                    survey.ride_10m,
+                    selected_ukri_tracks,
+                    survey.mpd_10m,
+                    selected_mpd_lines,
+                    exclusions,
+                ),
+                file_name=f"{export_prefix}_10m_results.zip",
                 mime="application/zip",
             )
     except ModuleNotFoundError:
