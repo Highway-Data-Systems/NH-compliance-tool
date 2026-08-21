@@ -234,6 +234,45 @@ def _mpd_chart_png(mpd_df: pd.DataFrame, lines: list[str], mpd_spec: dict, exclu
     return _fig_to_png_bytes(fig)
 
 
+def _comparison_chart_png(
+    primary: pd.DataFrame,
+    comparison: pd.DataFrame,
+    metric: str,
+    ylabel: str,
+    title: str,
+    exclusions: list[tuple[float, float]],
+):
+    if primary.empty and comparison.empty:
+        return None
+    plt = _load_pyplot()
+    fig, ax = plt.subplots(figsize=(7.3, 2.9))
+    if not primary.empty and metric in primary.columns:
+        ax.plot(
+            primary["chainage"].to_numpy(dtype=float),
+            primary[metric].to_numpy(dtype=float),
+            color="#1d4ed8",
+            lw=1.0,
+            label="Primary",
+        )
+    if not comparison.empty and metric in comparison.columns:
+        ax.plot(
+            comparison["chainage"].to_numpy(dtype=float),
+            comparison[metric].to_numpy(dtype=float),
+            color="#dc2626",
+            lw=1.0,
+            label="Comparison",
+        )
+    for start, end in exclusions or []:
+        ax.axvspan(start, end, color="#6b7280", alpha=0.20, zorder=0)
+    ax.set_xlabel("Chainage (m)", fontsize=8)
+    ax.set_ylabel(ylabel, fontsize=8)
+    ax.tick_params(labelsize=7)
+    ax.grid(True, color="#e5e7eb", lw=0.5)
+    ax.legend(loc="upper right", fontsize=7, framealpha=0.85)
+    ax.set_title(title, fontsize=9)
+    return _fig_to_png_bytes(fig)
+
+
 def _deg2num(lon_deg, lat_deg, zoom: int):
     n = 2.0 ** zoom
     xt = (lon_deg + 180.0) / 360.0 * n
@@ -684,6 +723,182 @@ def _pdf_report_bytes(
         canvas.setFont("Helvetica", 7)
         canvas.setFillColor(colors.HexColor("#6b7280"))
         canvas.drawString(14 * mm, 8 * mm, "National Highways Ride and MPD Evaluation Report")
+        canvas.drawRightString(A4[0] - 14 * mm, 8 * mm, f"Page {current_doc.page}")
+        canvas.restoreState()
+
+    doc.build(story, onFirstPage=_draw_page_furniture, onLaterPages=_draw_page_furniture)
+    return buffer.getvalue()
+
+
+def _pdf_comparison_report_bytes(
+    primary,
+    comparison,
+    exclusions: list[tuple[float, float]],
+    ride_tracks: list[str],
+    mpd_lines: list[str],
+    offset_m: float = 0.0,
+) -> bytes:
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=14 * mm,
+        leftMargin=14 * mm,
+        topMargin=22 * mm,
+        bottomMargin=14 * mm,
+        title="National Highways Comparison Report",
+    )
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(name="Small", parent=styles["BodyText"], fontSize=8, leading=10))
+    styles.add(
+        ParagraphStyle(
+            name="SmallHeader",
+            parent=styles["Small"],
+            textColor=colors.white,
+            fontName="Helvetica-Bold",
+        )
+    )
+
+    def make_table(rows, widths=None, font_size=8):
+        table_rows = [[Paragraph(escape(_report_text(cell)), styles["Small"]) for cell in row] for row in rows]
+        table = Table(table_rows, colWidths=widths, repeatRows=1)
+        style = [
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f2937")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("BOX", (0, 0), (-1, -1), 0.8, colors.HexColor("#9ca3af")),
+            ("INNERGRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#d1d5db")),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("FONTSIZE", (0, 0), (-1, -1), font_size),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ("LEFTPADDING", (0, 0), (-1, -1), 5),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ]
+        for row_index in range(1, len(rows)):
+            if row_index % 2 == 0:
+                style.append(("BACKGROUND", (0, row_index), (-1, row_index), colors.HexColor("#f3f4f6")))
+        table.setStyle(TableStyle(style))
+        return table
+
+    def add_delta_section(title, delta_df, columns, chart_png=None, units=""):
+        story.extend([PageBreak(), Paragraph(title, styles["Heading2"])])
+        if chart_png is not None:
+            story.extend([_png_flowable(chart_png, 176, 90), Spacer(1, 6)])
+        if delta_df.empty:
+            story.append(Paragraph("No matched comparison points were found.", styles["BodyText"]))
+            return
+        abs_delta = delta_df["delta"].abs()
+        unit_suffix = f" {units}" if units else ""
+        summary_rows = [
+            ["Matched points", f"{len(delta_df):,}"],
+            ["Mean delta", f"{delta_df['delta'].mean():.3f}{unit_suffix}"],
+            ["Median delta", f"{delta_df['delta'].median():.3f}{unit_suffix}"],
+            ["Max absolute delta", f"{abs_delta.max():.3f}{unit_suffix}"],
+            ["95th percentile absolute delta", f"{abs_delta.quantile(0.95):.3f}{unit_suffix}"],
+        ]
+        story.extend([make_table([["Measure", "Value"]] + summary_rows, [70 * mm, 96 * mm]), Spacer(1, 8)])
+        shown = delta_df[columns].head(500).copy()
+        rows = [columns] + [[_report_text(row.get(column)) for column in columns] for _, row in shown.iterrows()]
+        story.append(make_table(rows, [doc.width / len(columns)] * len(columns), font_size=7))
+        if len(delta_df) > len(shown):
+            story.append(Paragraph(f"Showing first {len(shown):,} of {len(delta_df):,} matched points.", styles["Small"]))
+
+    primary_name = primary.metadata.get("survey") or primary.metadata.get("file_name") or "Primary survey"
+    comparison_name = comparison.metadata.get("survey") or comparison.metadata.get("file_name") or "Comparison survey"
+    comp_ride = _apply_chainage_offset(comparison.ride_10m, offset_m)
+    comp_mpd = _apply_chainage_offset(comparison.mpd_10m, offset_m)
+    primary_ukri = _combined_ukri_chart_data(primary.ride_10m, ride_tracks)
+    comparison_ukri = _combined_ukri_chart_data(comp_ride, ride_tracks)
+    primary_mpd = _combined_mpd_chart_data(primary.mpd_10m, mpd_lines)
+    comparison_mpd = _combined_mpd_chart_data(comp_mpd, mpd_lines)
+    ukri_delta = _comparison_delta(primary_ukri, comparison_ukri, "combined_ukri", "primary_ukri", "comparison_ukri")
+    mpd_delta = _comparison_delta(primary_mpd, comparison_mpd, "combined_mpd_mm", "primary_mpd_mm", "comparison_mpd_mm")
+
+    story = [
+        Paragraph("National Highways Comparison Report", styles["Title"]),
+        Paragraph(f"{escape(str(primary_name))} vs {escape(str(comparison_name))}", styles["Heading2"]),
+        Paragraph(f"Generated: {datetime.now().strftime('%d/%m/%Y %H:%M')}", styles["Small"]),
+        Spacer(1, 8),
+    ]
+    overview_rows = [
+        ["Measure", "Primary", "Comparison"],
+        ["File type", primary.file_type, comparison.file_type],
+        ["Survey date", primary.metadata.get("survey_date", "-"), comparison.metadata.get("survey_date", "-")],
+        ["Length", _format_m(primary.metadata.get("survey_length_m")), _format_m(comparison.metadata.get("survey_length_m"))],
+        ["Ride rows", f"{len(primary.ride_10m):,}", f"{len(comparison.ride_10m):,}"],
+        ["MPD rows", f"{len(primary.mpd_10m):,}", f"{len(comparison.mpd_10m):,}"],
+        ["Chainage offset applied", "0.0 m", f"{offset_m:,.1f} m"],
+    ]
+    story.extend([make_table(overview_rows, [50 * mm, 58 * mm, 58 * mm]), Spacer(1, 10)])
+
+    check_rows = _route_location_checks(primary, comparison)
+    if check_rows:
+        rows = [["Check", "Primary", "Comparison", "Difference", "Status"]]
+        rows.extend([[row["check"], row["primary"], row["comparison"], row["difference"], row["status"]] for row in check_rows])
+        story.extend([Paragraph("Route Checks", styles["Heading2"]), make_table(rows, [42 * mm, 38 * mm, 38 * mm, 30 * mm, 18 * mm]), Spacer(1, 8)])
+
+    matched_rows = [
+        ["Metric", "Matched selection", "Matched points", "Mean delta", "Max absolute delta"],
+        [
+            "UKRI",
+            ", ".join(ride_tracks) if ride_tracks else "No matching tracks",
+            f"{len(ukri_delta):,}" if not ukri_delta.empty else "0",
+            f"{ukri_delta['delta'].mean():.3f}" if not ukri_delta.empty else "-",
+            f"{ukri_delta['delta'].abs().max():.3f}" if not ukri_delta.empty else "-",
+        ],
+        [
+            "MPD",
+            ", ".join(mpd_lines) if mpd_lines else "No matching lines",
+            f"{len(mpd_delta):,}" if not mpd_delta.empty else "0",
+            f"{mpd_delta['delta'].mean():.3f} mm" if not mpd_delta.empty else "-",
+            f"{mpd_delta['delta'].abs().max():.3f} mm" if not mpd_delta.empty else "-",
+        ],
+    ]
+    story.extend([Paragraph("Comparison Summary", styles["Heading2"]), make_table(matched_rows, [26 * mm, 64 * mm, 28 * mm, 24 * mm, 24 * mm])])
+
+    ukri_chart = _comparison_chart_png(primary_ukri, comparison_ukri, "combined_ukri", "UKRI", "Combined UKRI Comparison", exclusions)
+    add_delta_section(
+        "UKRI Comparison Detail",
+        ukri_delta,
+        ["chainage", "primary_ukri", "comparison_ukri", "delta"],
+        chart_png=ukri_chart,
+    )
+
+    mpd_chart = _comparison_chart_png(primary_mpd, comparison_mpd, "combined_mpd_mm", "MPD (mm)", "Combined MPD Comparison", exclusions)
+    add_delta_section(
+        "MPD Comparison Detail",
+        mpd_delta,
+        ["chainage", "primary_mpd_mm", "comparison_mpd_mm", "delta"],
+        chart_png=mpd_chart,
+        units="mm",
+    )
+
+    def _draw_page_furniture(canvas, current_doc):
+        canvas.saveState()
+        if HDS_LOGO_LIGHT.exists():
+            logo_width = 30 * mm
+            logo_height = logo_width * 179 / 600
+            canvas.drawImage(
+                str(HDS_LOGO_LIGHT),
+                A4[0] - 14 * mm - logo_width,
+                A4[1] - 10 * mm - logo_height,
+                width=logo_width,
+                height=logo_height,
+                mask="auto",
+                preserveAspectRatio=True,
+            )
+        canvas.setStrokeColor(colors.HexColor("#e5e7eb"))
+        canvas.line(14 * mm, 11 * mm, A4[0] - 14 * mm, 11 * mm)
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(colors.HexColor("#6b7280"))
+        canvas.drawString(14 * mm, 8 * mm, "National Highways Comparison Report")
         canvas.drawRightString(A4[0] - 14 * mm, 8 * mm, f"Page {current_doc.page}")
         canvas.restoreState()
 
@@ -1561,6 +1776,25 @@ if tab_compare is not None:
 
         comp_ride = _apply_chainage_offset(comparison_survey.ride_10m, offset_m)
         comp_mpd = _apply_chainage_offset(comparison_survey.mpd_10m, offset_m)
+
+        try:
+            comparison_report_name = survey.metadata.get("survey") or uploaded.name.rsplit(".", 1)[0]
+            safe_comparison_report_name = _safe_filename(comparison_report_name, export_prefix)
+            st.download_button(
+                "Download comparison PDF report",
+                data=_pdf_comparison_report_bytes(
+                    survey,
+                    comparison_survey,
+                    exclusions,
+                    common_ukri_tracks,
+                    common_mpd_lines,
+                    offset_m,
+                ),
+                file_name=f"{safe_comparison_report_name}_comparison_report.pdf",
+                mime="application/pdf",
+            )
+        except ModuleNotFoundError:
+            st.warning("PDF export needs the reportlab package. Run `pip install -r requirements.txt` and restart the app.")
 
         if common_ukri_tracks:
             st.markdown("**Combined UKRI Comparison**")
