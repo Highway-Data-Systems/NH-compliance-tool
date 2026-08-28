@@ -46,14 +46,20 @@ def _format_m(value):
     return f"{float(value):,.1f} m"
 
 
+def _display_status(value):
+    return {"PASS": "COMPLIANT", "FAIL": "NON COMPLIANT"}.get(value, value)
+
+
 def _style_status(df: pd.DataFrame):
     if df.empty or "status" not in df.columns:
         return df
-    return df.style.map(
+    shown = df.copy()
+    shown["status"] = shown["status"].map(_display_status)
+    return shown.style.map(
         lambda v: "background-color: #d8f3dc; color: #14532d"
-        if v == "PASS"
+        if v == "COMPLIANT"
         else "background-color: #fee2e2; color: #7f1d1d"
-        if v == "FAIL"
+        if v == "NON COMPLIANT"
         else "",
         subset=["status"],
     )
@@ -67,8 +73,8 @@ def _status_label(has_data: bool, has_fail: bool) -> str:
 
 def _status_delta(status: str) -> str:
     return {
-        "PASS": "All assessed sections pass",
-        "FAIL": "One or more assessed sections fail",
+        "PASS": "All assessed sections are compliant",
+        "FAIL": "One or more assessed sections are non compliant",
         "NO DATA": "No assessable results",
     }[status]
 
@@ -84,7 +90,7 @@ def _status_card(label: str, status: str, detail: str):
         f"""
         <div style="border:1px solid {border}; background:{bg}; border-radius:8px; padding:14px 16px;">
             <div style="font-size:0.85rem; color:{text}; font-weight:700;">{label}</div>
-            <div style="font-size:2rem; line-height:1.2; color:{text}; font-weight:800;">{status}</div>
+            <div style="font-size:2rem; line-height:1.2; color:{text}; font-weight:800;">{_display_status(status)}</div>
             <div style="font-size:0.85rem; color:{text};">{detail}</div>
         </div>
         """,
@@ -99,7 +105,7 @@ def _report_text(value) -> str:
         if pd.isna(value):
             return "-"
         return f"{value:,.3f}".rstrip("0").rstrip(".")
-    return str(value)
+    return str(_display_status(value))
 
 
 def _status_counts(df: pd.DataFrame) -> tuple[int, int, int]:
@@ -186,7 +192,7 @@ def _ride_chart_png(ride_df: pd.DataFrame, tracks: list[str], ride_spec: dict, e
     fig, ax = plt.subplots(figsize=(7.3, 2.9))
     ax.axhspan(0, pct80, color="#dcfce7", zorder=0, label=f"Target < {pct80}")
     ax.axhspan(pct80, all_lt, color="#fef9c3", zorder=0, label=f"Caution {pct80}-{all_lt}")
-    ax.axhspan(all_lt, ymax, color="#fee2e2", zorder=0, label=f"Fail > {all_lt}")
+    ax.axhspan(all_lt, ymax, color="#fee2e2", zorder=0, label=f"Non Compliant > {all_lt}")
     ax.axhline(pct80, color="#ca8a04", lw=1.0, ls="--")
     ax.axhline(all_lt, color="#dc2626", lw=1.1, ls="--")
     for start, end in exclusions or []:
@@ -527,7 +533,7 @@ def _pdf_report_bytes(
     story.append(Paragraph(f"Generated: {datetime.now().strftime('%d/%m/%Y %H:%M')}", styles["Small"]))
     story.append(Spacer(1, 8))
 
-    status_data = [["Overall", "UKRI", "MPD"], [overall_status, ride_status, mpd_status]]
+    status_data = [["Overall", "UKRI", "MPD"], [_display_status(overall_status), _display_status(ride_status), _display_status(mpd_status)]]
     status_table = Table(status_data, colWidths=[55 * mm, 55 * mm, 55 * mm])
     status_table.setStyle(
         TableStyle(
@@ -565,8 +571,8 @@ def _pdf_report_bytes(
         ["Ride rows", f"{len(survey.ride_10m):,}"],
         ["MPD rows", f"{len(survey.mpd_10m):,}"],
         ["Excluded regions", str(len(exclusions))],
-        ["UKRI assessed sections", f"{ride_total:,} ({ride_pass:,} pass, {ride_fail:,} fail)"],
-        ["MPD assessed sections", f"{mpd_total:,} ({mpd_pass:,} pass, {mpd_fail:,} fail)"],
+        ["UKRI assessed sections", f"{ride_total:,} ({ride_pass:,} compliant, {ride_fail:,} non compliant)"],
+        ["MPD assessed sections", f"{mpd_total:,} ({mpd_pass:,} compliant, {mpd_fail:,} non compliant)"],
     ]
     metadata_rows.extend(_survey_endpoint_rows(survey))
     meta_table = Table(metadata_rows, colWidths=[48 * mm, 118 * mm])
@@ -690,13 +696,13 @@ def _pdf_report_bytes(
             status_col = columns.index("status")
             for offset, (_, row) in enumerate(shown.iterrows(), start=1):
                 status_value = _report_text(row.get("status"))
-                cell_bg = "#dcfce7" if status_value == "PASS" else "#fee2e2" if status_value == "FAIL" else None
+                cell_bg = "#dcfce7" if status_value == "COMPLIANT" else "#fee2e2" if status_value == "NON COMPLIANT" else None
                 if cell_bg:
                     table_style.append(
                         ("BACKGROUND", (status_col, offset), (status_col, offset), colors.HexColor(cell_bg))
                     )
         result_table.setStyle(TableStyle(table_style))
-        caption = "Failed sections are shown below." if not fail_df.empty else "No failed sections; first assessed rows are shown below."
+        caption = "Non compliant sections are shown below." if not fail_df.empty else "No non compliant sections; first assessed rows are shown below."
         if len(table_df) > max_rows:
             caption += f" Showing first {max_rows:,} of {len(table_df):,} rows."
         story.extend([Paragraph(caption, styles["BodyText"]), Spacer(1, 4), result_table])
@@ -846,7 +852,7 @@ def _pdf_comparison_report_bytes(
     check_rows = _route_location_checks(primary, comparison)
     if check_rows:
         rows = [["Check", "Primary", "Comparison/Pre", "Difference", "Status"]]
-        rows.extend([[row["check"], row["primary"], row["comparison"], row["difference"], row["status"]] for row in check_rows])
+        rows.extend([[row["check"], row["primary"], row["comparison"], row["difference"], _display_status(row["status"])] for row in check_rows])
         story.extend([Paragraph("Route Checks", styles["Heading2"]), make_table(rows, [42 * mm, 38 * mm, 38 * mm, 30 * mm, 18 * mm]), Spacer(1, 8)])
 
     matched_rows = [
@@ -1472,7 +1478,7 @@ with st.sidebar:
     st.caption("RCD files are preferred as they contain exclusions and structure data. BCD files include derived ride/MPD values.")
 
 if not uploaded:
-    st.info("Choose one of the example BCD files to see pass/fail sections and MPD track checks.")
+    st.info("Choose one of the example BCD files to see compliant/non compliant sections and MPD track checks.")
     st.stop()
 
 try:
@@ -1521,7 +1527,7 @@ if ride_spec_name is None:
 if mpd_spec_name is None:
     missing_specs.append("MPD profile")
 if missing_specs:
-    st.warning(f"Select {' and '.join(missing_specs)} in the sidebar to run pass/fail checks and exports.")
+    st.warning(f"Select {' and '.join(missing_specs)} in the sidebar to run compliance checks and exports.")
     if not survey.geometry.empty:
         st.markdown("**Survey Location**")
         _survey_map(geometry_geo)
@@ -1537,10 +1543,10 @@ if available_ukri_tracks:
         available_ukri_tracks,
         default=available_ukri_tracks,
         format_func=_ukri_track_label,
-        help="Combined UKRI pass/fail is calculated from all selected track values in each 300 m section.",
+        help="Combined UKRI compliance is calculated from all selected track values in each 300 m section.",
     )
     if not selected_ukri_tracks:
-        st.warning("Select at least one UKRI track in the sidebar to run UKRI pass/fail checks.")
+        st.warning("Select at least one UKRI track in the sidebar to run UKRI compliance checks.")
         st.stop()
 available_mpd_lines = _mpd_line_options(survey.mpd_10m)
 selected_mpd_lines = available_mpd_lines
@@ -1549,10 +1555,10 @@ if available_mpd_lines:
         "MPD tracks for calculation",
         available_mpd_lines,
         default=available_mpd_lines,
-        help="Combined MPD pass/fail is calculated from all selected track values in each 100 m section.",
+        help="Combined MPD compliance is calculated from all selected track values in each 100 m section.",
     )
     if not selected_mpd_lines:
-        st.warning("Select at least one MPD track in the sidebar to run MPD pass/fail checks.")
+        st.warning("Select at least one MPD track in the sidebar to run MPD compliance checks.")
         st.stop()
 summary_ride_results, summary_mpd_results, ride_status, mpd_status, overall_status = _overall_results(
     survey, ride_spec, mpd_spec, exclusions, selected_ukri_tracks, selected_mpd_lines
@@ -1653,13 +1659,13 @@ with tab_summary:
     elif survey.file_type == "RCD":
         st.warning(
             "This RCD is raw profile data. The app currently validates structure, events, geometry and coverage; "
-            "RI/MPD pass/fail checks need a BCD or a completed derived-value algorithm."
+            "RI/MPD compliance checks need a BCD or a completed derived-value algorithm."
         )
 
     st.markdown("**Survey Location**")
     _survey_map(geometry_geo)
     if exclusions:
-        st.caption(f"{len(exclusions)} excluded region(s) removed from UKRI and MPD pass/fail calculations.")
+        st.caption(f"{len(exclusions)} excluded region(s) removed from UKRI and MPD compliance calculations.")
 
     if not survey.geometry.empty:
         st.markdown("**Longitudinal Geometry**")
@@ -1697,8 +1703,8 @@ with tab_ride:
         fail_count = int((ride_results["status"] == "FAIL").sum()) if not ride_results.empty else 0
         r1, r2, r3 = st.columns(3)
         r1.metric("Assessment lengths", len(ride_results))
-        r2.metric("Pass", pass_count)
-        r3.metric("Fail", fail_count)
+        r2.metric("Compliant", pass_count)
+        r3.metric("Non Compliant", fail_count)
 
         if chart_data.empty or chart_y not in chart_data.columns:
             st.info("No combined UKRI chart data was found for the selected ride view.")
@@ -1773,8 +1779,8 @@ with tab_mpd:
         fail_count = int((mpd_results["status"] == "FAIL").sum()) if not mpd_results.empty else 0
         m1, m2, m3 = st.columns(3)
         m1.metric("100 m sections", len(mpd_results))
-        m2.metric("Pass", pass_count)
-        m3.metric("Fail", fail_count)
+        m2.metric("Compliant", pass_count)
+        m3.metric("Non Compliant", fail_count)
 
         avg_mpd = _combined_mpd_chart_data(mpd_source, selected_lines)
         st.markdown("**Combined MPD**")
