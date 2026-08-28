@@ -995,6 +995,46 @@ def _survey_map(geometry_geo: pd.DataFrame, height: int = 360, selected_chainage
     )
 
 
+def _comparison_map(primary_geo: pd.DataFrame, comparison_geo: pd.DataFrame, alignment: dict | None, height: int = 420):
+    if primary_geo.empty or comparison_geo.empty:
+        st.info("Both surveys need geometry coordinates to show the alignment map.")
+        return
+    primary_path = primary_geo[["lon", "lat"]].dropna().values.tolist()
+    comparison_path = comparison_geo[["lon", "lat"]].dropna().values.tolist()
+    all_points = pd.concat([primary_geo[["lat", "lon"]], comparison_geo[["lat", "lon"]]]).dropna()
+    midpoint = all_points.mean()
+    markers = []
+    for label, frame, color in [
+        ("Primary start", primary_geo, [25, 118, 210, 240]),
+        ("Comparison start", comparison_geo, [245, 158, 11, 240]),
+    ]:
+        row = frame.sort_values("chainage").iloc[0]
+        markers.append({**row.to_dict(), "point": label, "color": color})
+    if alignment and alignment.get("matched_row") is not None:
+        matched = dict(alignment["matched_row"])
+        if "lat" not in matched or "lon" not in matched:
+            matched["lon"], matched["lat"] = BNG_TO_WGS84.transform(float(matched["x"]), float(matched["y"]))
+        markers.append({**matched, "point": "GPS alignment point", "color": [147, 51, 234, 240]})
+    layers = [
+        pdk.Layer("PathLayer", data=[{"path": primary_path, "name": "Primary"}], get_path="path", get_width=6,
+                  get_color=[25, 118, 210, 220], width_min_pixels=3, pickable=True),
+        pdk.Layer("PathLayer", data=[{"path": comparison_path, "name": "Comparison"}], get_path="path", get_width=6,
+                  get_color=[245, 158, 11, 220], width_min_pixels=3, pickable=True),
+        pdk.Layer("ScatterplotLayer", data=markers, get_position="[lon, lat]", get_fill_color="color",
+                  get_radius=22, radius_min_pixels=6, pickable=True),
+    ]
+    st.pydeck_chart(
+        pdk.Deck(
+            map_style=None,
+            initial_view_state=pdk.ViewState(latitude=float(midpoint["lat"]), longitude=float(midpoint["lon"]), zoom=12, pitch=0),
+            layers=layers,
+            tooltip={"text": "{name}{point}\nChainage: {chainage} m\nE: {x}\nN: {y}"},
+        ),
+        use_container_width=True,
+        height=height,
+    )
+
+
 def _line_chart(
     df: pd.DataFrame,
     x: str,
@@ -1220,6 +1260,50 @@ def _endpoint_distance(summary_a: pd.DataFrame, summary_b: pd.DataFrame, index: 
     row_a = summary_a.iloc[index]
     row_b = summary_b.iloc[index]
     return float(np.hypot(float(row_a["x"]) - float(row_b["x"]), float(row_a["y"]) - float(row_b["y"])))
+
+
+def _gps_chainage_alignment(primary_geometry: pd.DataFrame, comparison_geometry: pd.DataFrame) -> dict | None:
+    """Estimate comparison offset by matching the start of either run onto the other route."""
+    required = {"chainage", "x", "y"}
+    if (primary_geometry.empty or comparison_geometry.empty
+            or not required.issubset(primary_geometry.columns)
+            or not required.issubset(comparison_geometry.columns)):
+        return None
+    primary = primary_geometry.dropna(subset=list(required)).sort_values("chainage")
+    comparison = comparison_geometry.dropna(subset=list(required)).sort_values("chainage")
+    if primary.empty or comparison.empty:
+        return None
+
+    def nearest(start: pd.Series, route: pd.DataFrame) -> tuple[pd.Series, float, int]:
+        distances = np.hypot(route["x"] - float(start["x"]), route["y"] - float(start["y"]))
+        position = int(np.argmin(distances.to_numpy()))
+        return route.iloc[position], float(distances.iloc[position]), position
+
+    primary_start, comparison_start = primary.iloc[0], comparison.iloc[0]
+    comparison_match, residual_a, comparison_index = nearest(primary_start, comparison)
+    primary_match, residual_b, primary_index = nearest(comparison_start, primary)
+    candidates = [
+        {"offset_m": float(primary_start["chainage"] - comparison_match["chainage"]), "residual_m": residual_a,
+         "anchor": "Primary start matched on comparison route", "matched_row": comparison_match.to_dict(),
+         "primary_index": 0, "comparison_index": comparison_index},
+        {"offset_m": float(primary_match["chainage"] - comparison_start["chainage"]), "residual_m": residual_b,
+         "anchor": "Comparison start matched on primary route", "matched_row": primary_match.to_dict(),
+         "primary_index": primary_index, "comparison_index": 0},
+    ]
+    result = min(candidates, key=lambda item: item["residual_m"])
+    result["direction_ok"] = None
+    if len(primary) > 1 and len(comparison) > 1:
+        def tangent(route: pd.DataFrame, index: int) -> np.ndarray:
+            before, after = max(0, index - 5), min(len(route) - 1, index + 5)
+            return route.iloc[after][["x", "y"]].to_numpy(dtype=float) - route.iloc[before][["x", "y"]].to_numpy(dtype=float)
+
+        vector_a = tangent(primary, result["primary_index"])
+        vector_b = tangent(comparison, result["comparison_index"])
+        if np.linalg.norm(vector_a) > 0 and np.linalg.norm(vector_b) > 0:
+            result["direction_ok"] = bool(np.dot(vector_a, vector_b) >= 0)
+    result.pop("primary_index")
+    result.pop("comparison_index")
+    return result
 
 
 def _route_location_checks(primary, comparison) -> list[dict]:
@@ -1768,18 +1852,36 @@ if tab_compare is not None:
         common_mpd_lines = [line for line in selected_mpd_lines if line in comparison_mpd_lines]
 
         st.markdown("**Alignment**")
-        enable_offset = st.toggle(
-            "Apply chainage offset to comparison dataset",
-            value=False,
-            help="Use this when repeat surveys start a little earlier/later along the same route.",
+        gps_alignment = _gps_chainage_alignment(survey.geometry, comparison_survey.geometry)
+        auto_offset = float(gps_alignment["offset_m"]) if gps_alignment else 0.0
+        alignment_mode = st.radio(
+            "Comparison alignment", ["GPS start alignment", "Manual offset", "No offset"], horizontal=True,
+            index=0 if gps_alignment else 1,
+            help="GPS alignment matches the start of the shorter/overlapping survey to the other route.",
         )
-        length_hint = float(survey.metadata.get("survey_length_m") or 0.0)
-        max_offset = max(100.0, min(500.0, length_hint * 0.1 if length_hint else 100.0))
-        offset_m = (
-            st.slider("Comparison chainage offset (m)", -max_offset, max_offset, 0.0, 1.0)
-            if enable_offset
-            else 0.0
-        )
+        if alignment_mode == "Manual offset":
+            offset_m = float(st.number_input(
+                "Comparison chainage offset (m)", value=round(auto_offset, 1), step=1.0, format="%.1f",
+                help="Positive values move comparison data forwards along primary chainage; negative values move it backwards. There is no 500 m limit.",
+            ))
+        elif alignment_mode == "GPS start alignment":
+            offset_m = auto_offset
+        else:
+            offset_m = 0.0
+
+        if gps_alignment:
+            residual = float(gps_alignment["residual_m"])
+            st.caption(f"GPS suggested offset: {auto_offset:+,.1f} m · nearest-route error: {residual:,.1f} m · {gps_alignment['anchor']}")
+            if residual > 20.0:
+                st.warning(f"The survey GPS traces do not align reliably (nearest-route error {residual:,.1f} m). Check the map and use a manual offset only if these are known to be the same route.")
+            if gps_alignment.get("direction_ok") is False:
+                st.warning("The surveys appear to run in opposite directions, so chainage comparison may not be valid.")
+        else:
+            st.warning("GPS alignment is unavailable because one or both surveys have no usable geometry coordinates.")
+
+        st.markdown("**GPS Alignment Map**")
+        st.caption("Primary route is blue; comparison route is orange; the selected GPS anchor is purple.")
+        _comparison_map(geometry_geo, comparison_geometry_geo, gps_alignment)
 
         if not common_ukri_tracks and not common_mpd_lines:
             st.warning("No matching UKRI tracks or MPD tracks were found between the two datasets.")
