@@ -50,6 +50,33 @@ def _display_status(value):
     return {"PASS": "COMPLIANT", "FAIL": "NON COMPLIANT"}.get(value, value)
 
 
+WHOLE_NUMBER_COLUMNS = {
+    "start_m", "end_m", "chainage", "section_start", "section_start_100m", "section_start_300m",
+    "valid_10m_values", "expected_10m_values", "valid_track_values",
+}
+TWO_DECIMAL_COLUMNS = {
+    "max_ri", "pct_below_lower_limit", "valid_pct", "avg_mpd_mm", "std_mpd_mm",
+    "combined_ukri", "combined_mpd_mm", "primary_ukri", "comparison_pre_ukri",
+    "comparison_ukri", "primary_mpd_mm", "comparison_pre_mpd_mm", "comparison_mpd_mm", "delta",
+}
+
+
+def _table_formatters(columns) -> dict[str, str]:
+    formats = {}
+    for column in columns:
+        if column in WHOLE_NUMBER_COLUMNS or column.endswith("_count"):
+            formats[column] = "{:.0f}"
+        elif column in TWO_DECIMAL_COLUMNS:
+            formats[column] = "{:.2f}"
+    return formats
+
+
+def _format_table(df: pd.DataFrame):
+    if df.empty:
+        return df
+    return df.style.format(_table_formatters(df.columns), na_rep="-")
+
+
 def _style_status(df: pd.DataFrame):
     if df.empty or "status" not in df.columns:
         return df
@@ -62,7 +89,7 @@ def _style_status(df: pd.DataFrame):
         if v == "NON COMPLIANT"
         else "",
         subset=["status"],
-    )
+    ).format(_table_formatters(shown.columns), na_rep="-")
 
 
 def _status_label(has_data: bool, has_fail: bool) -> str:
@@ -98,12 +125,16 @@ def _status_card(label: str, status: str, detail: str):
     )
 
 
-def _report_text(value) -> str:
+def _report_text(value, column: str | None = None) -> str:
     if value is None:
         return "-"
     if isinstance(value, (float, np.floating)):
         if pd.isna(value):
             return "-"
+        if column in WHOLE_NUMBER_COLUMNS or (column and column.endswith("_count")):
+            return f"{value:,.0f}"
+        if column in TWO_DECIMAL_COLUMNS:
+            return f"{value:,.2f}"
         return f"{value:,.3f}".rstrip("0").rstrip(".")
     return str(_display_status(value))
 
@@ -673,7 +704,7 @@ def _pdf_report_bytes(
         shown = table_df[columns].head(max_rows).copy()
         rows = [[Paragraph(escape(col), styles["SmallHeader"]) for col in columns]]
         for _, row in shown.iterrows():
-            rows.append([Paragraph(escape(_report_text(row.get(col))), styles["Small"]) for col in columns])
+            rows.append([Paragraph(escape(_report_text(row.get(col), col)), styles["Small"]) for col in columns])
         available_width = doc.width
         widths = [available_width / len(columns)] * len(columns)
         result_table = Table(rows, colWidths=widths, repeatRows=1)
@@ -816,7 +847,7 @@ def _pdf_comparison_report_bytes(
         ]
         story.extend([make_table([["Measure", "Value"]] + summary_rows, [70 * mm, 96 * mm]), Spacer(1, 8)])
         shown = delta_df[columns].head(500).copy()
-        rows = [columns] + [[_report_text(row.get(column)) for column in columns] for _, row in shown.iterrows()]
+        rows = [columns] + [[_report_text(row.get(column), column) for column in columns] for _, row in shown.iterrows()]
         story.append(make_table(rows, [doc.width / len(columns)] * len(columns), font_size=7))
         if len(delta_df) > len(shown):
             story.append(Paragraph(f"Showing first {len(shown):,} of {len(delta_df):,} matched points.", styles["Small"]))
@@ -1945,7 +1976,7 @@ if tab_compare is not None:
                 d1.metric("Matched UKRI points", f"{len(ukri_delta):,}")
                 d2.metric("Mean delta", f"{ukri_delta['delta'].mean():.3f}")
                 d3.metric("Max abs delta", f"{ukri_delta['delta'].abs().max():.3f}")
-                st.dataframe(ukri_delta.head(500), use_container_width=True, hide_index=True)
+                st.dataframe(_format_table(ukri_delta.head(500)), use_container_width=True, hide_index=True)
         elif not survey.ride_10m.empty or not comparison_survey.ride_10m.empty:
             st.info("No matching UKRI tracks were found for comparison.")
 
@@ -1980,7 +2011,7 @@ if tab_compare is not None:
                 d1.metric("Matched MPD points", f"{len(mpd_delta):,}")
                 d2.metric("Mean delta", f"{mpd_delta['delta'].mean():.3f} mm")
                 d3.metric("Max abs delta", f"{mpd_delta['delta'].abs().max():.3f} mm")
-                st.dataframe(mpd_delta.head(500), use_container_width=True, hide_index=True)
+                st.dataframe(_format_table(mpd_delta.head(500)), use_container_width=True, hide_index=True)
         elif not survey.mpd_10m.empty or not comparison_survey.mpd_10m.empty:
             st.info("No matching MPD tracks were found for comparison.")
 
