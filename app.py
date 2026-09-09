@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import base64
+import json
 import zipfile
 from datetime import datetime
 from io import BytesIO
@@ -971,9 +972,9 @@ def _with_nearest_location(data: pd.DataFrame, geometry_geo: pd.DataFrame) -> pd
     return pd.merge_asof(base, loc, on="chainage", direction="nearest")
 
 
-def _selected_map_style():
+def _selected_map_style() -> str:
     if st.session_state.get("survey_map_style", "Dark") == "Satellite":
-        return {
+        style = {
             "version": 8,
             "sources": {
                 "satellite": {
@@ -989,6 +990,10 @@ def _selected_map_style():
             },
             "layers": [{"id": "satellite", "type": "raster", "source": "satellite"}],
         }
+        # Streamlit expects a string and calls indexOf on mapStyle. A data URL
+        # lets the map renderer load our raster style without passing a dict.
+        encoded_style = base64.b64encode(json.dumps(style).encode("utf-8")).decode("ascii")
+        return f"data:application/json;base64,{encoded_style}"
     return "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"
 
 
@@ -1039,7 +1044,7 @@ def _survey_map(geometry_geo: pd.DataFrame, height: int = 360, selected_chainage
     st.pydeck_chart(
         pdk.Deck(
             map_style=_selected_map_style(),
-            map_provider="mapbox",
+            map_provider="carto",
             initial_view_state=pdk.ViewState(
                 latitude=float(midpoint["lat"]),
                 longitude=float(midpoint["lon"]),
@@ -1085,7 +1090,7 @@ def _comparison_map(primary_geo: pd.DataFrame, comparison_geo: pd.DataFrame, ali
     st.pydeck_chart(
         pdk.Deck(
             map_style=_selected_map_style(),
-            map_provider="mapbox",
+            map_provider="carto",
             initial_view_state=pdk.ViewState(latitude=float(midpoint["lat"]), longitude=float(midpoint["lon"]), zoom=12, pitch=0),
             layers=layers,
             tooltip={"text": "{name}{point}\nChainage: {chainage} m\nE: {x}\nN: {y}"},
