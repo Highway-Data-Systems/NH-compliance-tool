@@ -971,6 +971,27 @@ def _with_nearest_location(data: pd.DataFrame, geometry_geo: pd.DataFrame) -> pd
     return pd.merge_asof(base, loc, on="chainage", direction="nearest")
 
 
+def _selected_map_style():
+    if st.session_state.get("survey_map_style", "Dark") == "Satellite":
+        return {
+            "version": 8,
+            "sources": {
+                "satellite": {
+                    "type": "raster",
+                    "tiles": [
+                        "https://services.arcgisonline.com/ArcGIS/rest/services/"
+                        "World_Imagery/MapServer/tile/{z}/{y}/{x}"
+                    ],
+                    "tileSize": 256,
+                    "maxzoom": 19,
+                    "attribution": "Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community",
+                }
+            },
+            "layers": [{"id": "satellite", "type": "raster", "source": "satellite"}],
+        }
+    return "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"
+
+
 def _survey_map(geometry_geo: pd.DataFrame, height: int = 360, selected_chainage: float | None = None):
     if geometry_geo.empty:
         st.info("No geometry coordinates were found for mapping.")
@@ -1017,7 +1038,7 @@ def _survey_map(geometry_geo: pd.DataFrame, height: int = 360, selected_chainage
             )
     st.pydeck_chart(
         pdk.Deck(
-            map_style=None,
+            map_style=_selected_map_style(),
             initial_view_state=pdk.ViewState(
                 latitude=float(midpoint["lat"]),
                 longitude=float(midpoint["lon"]),
@@ -1062,7 +1083,7 @@ def _comparison_map(primary_geo: pd.DataFrame, comparison_geo: pd.DataFrame, ali
     ]
     st.pydeck_chart(
         pdk.Deck(
-            map_style=None,
+            map_style=_selected_map_style(),
             initial_view_state=pdk.ViewState(latitude=float(midpoint["lat"]), longitude=float(midpoint["lon"]), zoom=12, pitch=0),
             layers=layers,
             tooltip={"text": "{name}{point}\nChainage: {chainage} m\nE: {x}\nN: {y}"},
@@ -1493,6 +1514,13 @@ with st.sidebar:
         list(MPD_SPECS),
         index=None,
         placeholder="Select MPD profile",
+    )
+    st.radio(
+        "Map style",
+        ["Dark", "Satellite"],
+        key="survey_map_style",
+        horizontal=True,
+        help="Applies to all survey location and comparison maps.",
     )
     map_hover = st.toggle(
         "Map coordinates on charts",
