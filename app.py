@@ -1039,6 +1039,7 @@ def _survey_map(geometry_geo: pd.DataFrame, height: int = 360, selected_chainage
     st.pydeck_chart(
         pdk.Deck(
             map_style=_selected_map_style(),
+            map_provider="mapbox",
             initial_view_state=pdk.ViewState(
                 latitude=float(midpoint["lat"]),
                 longitude=float(midpoint["lon"]),
@@ -1084,6 +1085,7 @@ def _comparison_map(primary_geo: pd.DataFrame, comparison_geo: pd.DataFrame, ali
     st.pydeck_chart(
         pdk.Deck(
             map_style=_selected_map_style(),
+            map_provider="mapbox",
             initial_view_state=pdk.ViewState(latitude=float(midpoint["lat"]), longitude=float(midpoint["lon"]), zoom=12, pitch=0),
             layers=layers,
             tooltip={"text": "{name}{point}\nChainage: {chainage} m\nE: {x}\nN: {y}"},
