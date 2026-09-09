@@ -1014,6 +1014,7 @@ def _survey_map(geometry_geo: pd.DataFrame, height: int = 360, selected_chainage
             get_width=5,
             get_color=[25, 118, 210],
             width_min_pixels=3,
+            width_max_pixels=5,
             pickable=True,
         ),
         pdk.Layer(
@@ -1023,6 +1024,7 @@ def _survey_map(geometry_geo: pd.DataFrame, height: int = 360, selected_chainage
             get_fill_color="color",
             get_radius=18,
             radius_min_pixels=5,
+            radius_max_pixels=7,
             pickable=True,
         ),
     ]
@@ -1038,6 +1040,7 @@ def _survey_map(geometry_geo: pd.DataFrame, height: int = 360, selected_chainage
                     get_fill_color=[239, 68, 68, 240],
                     get_radius=28,
                     radius_min_pixels=8,
+                    radius_max_pixels=10,
                     pickable=True,
                 )
             )
@@ -1081,11 +1084,11 @@ def _comparison_map(primary_geo: pd.DataFrame, comparison_geo: pd.DataFrame, ali
         markers.append({**matched, "point": "GPS alignment point", "color": [147, 51, 234, 240]})
     layers = [
         pdk.Layer("PathLayer", data=[{"path": primary_path, "name": "Primary"}], get_path="path", get_width=6,
-                  get_color=[25, 118, 210, 220], width_min_pixels=3, pickable=True),
+                  get_color=[25, 118, 210, 220], width_min_pixels=3, width_max_pixels=5, pickable=True),
         pdk.Layer("PathLayer", data=[{"path": comparison_path, "name": "Comparison"}], get_path="path", get_width=6,
-                  get_color=[245, 158, 11, 220], width_min_pixels=3, pickable=True),
+                  get_color=[245, 158, 11, 220], width_min_pixels=3, width_max_pixels=5, pickable=True),
         pdk.Layer("ScatterplotLayer", data=markers, get_position="[lon, lat]", get_fill_color="color",
-                  get_radius=22, radius_min_pixels=6, pickable=True),
+                  get_radius=22, radius_min_pixels=6, radius_max_pixels=8, pickable=True),
     ]
     st.pydeck_chart(
         pdk.Deck(
