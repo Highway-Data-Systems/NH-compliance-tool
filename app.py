@@ -1000,11 +1000,26 @@ def _selected_map_style() -> str:
     return "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"
 
 
+def _map_route_segments(geometry_geo: pd.DataFrame, label: str) -> list[dict]:
+    rows = geometry_geo.to_dict("records")
+    segments = []
+    for start, end in zip(rows, rows[1:]):
+        if any(pd.isna(row[axis]) for row in (start, end) for axis in ("lon", "lat")):
+            continue
+        segments.append({
+            "path": [[start["lon"], start["lat"]], [end["lon"], end["lat"]]],
+            "point": f"{label} (segment start)",
+            "chainage": start["chainage"],
+            "x": start["x"],
+            "y": start["y"],
+        })
+    return segments
+
+
 def _survey_map(geometry_geo: pd.DataFrame, height: int = 360, selected_chainage: float | None = None):
     if geometry_geo.empty:
         st.info("No geometry coordinates were found for mapping.")
         return
-    path = geometry_geo[["lon", "lat"]].dropna().values.tolist()
     midpoint = geometry_geo[["lat", "lon"]].mean()
     endpoints = geometry_geo.iloc[[0, -1]].copy()
     endpoints["point"] = ["Start", "End"]
@@ -1012,7 +1027,7 @@ def _survey_map(geometry_geo: pd.DataFrame, height: int = 360, selected_chainage
     layers = [
         pdk.Layer(
             "PathLayer",
-            data=[{"path": path, "name": "Survey route"}],
+            data=_map_route_segments(geometry_geo, "Survey route"),
             get_path="path",
             get_width=5,
             get_color=[25, 118, 210],
@@ -1069,8 +1084,6 @@ def _comparison_map(primary_geo: pd.DataFrame, comparison_geo: pd.DataFrame, ali
     if primary_geo.empty or comparison_geo.empty:
         st.info("Both surveys need geometry coordinates to show the alignment map.")
         return
-    primary_path = primary_geo[["lon", "lat"]].dropna().values.tolist()
-    comparison_path = comparison_geo[["lon", "lat"]].dropna().values.tolist()
     all_points = pd.concat([primary_geo[["lat", "lon"]], comparison_geo[["lat", "lon"]]]).dropna()
     midpoint = all_points.mean()
     markers = []
@@ -1086,9 +1099,9 @@ def _comparison_map(primary_geo: pd.DataFrame, comparison_geo: pd.DataFrame, ali
             matched["lon"], matched["lat"] = BNG_TO_WGS84.transform(float(matched["x"]), float(matched["y"]))
         markers.append({**matched, "point": "GPS alignment point", "color": [147, 51, 234, 240]})
     layers = [
-        pdk.Layer("PathLayer", data=[{"path": primary_path, "name": "Primary"}], get_path="path", get_width=6,
+        pdk.Layer("PathLayer", data=_map_route_segments(primary_geo, "Primary"), get_path="path", get_width=6,
                   get_color=[25, 118, 210, 220], width_min_pixels=3, width_max_pixels=5, pickable=True),
-        pdk.Layer("PathLayer", data=[{"path": comparison_path, "name": "Comparison"}], get_path="path", get_width=6,
+        pdk.Layer("PathLayer", data=_map_route_segments(comparison_geo, "Comparison"), get_path="path", get_width=6,
                   get_color=[245, 158, 11, 220], width_min_pixels=3, width_max_pixels=5, pickable=True),
         pdk.Layer("ScatterplotLayer", data=markers, get_position="[lon, lat]", get_fill_color="color",
                   get_radius=22, radius_min_pixels=6, radius_max_pixels=8, pickable=True),
@@ -1099,7 +1112,7 @@ def _comparison_map(primary_geo: pd.DataFrame, comparison_geo: pd.DataFrame, ali
             map_provider="carto",
             initial_view_state=pdk.ViewState(latitude=float(midpoint["lat"]), longitude=float(midpoint["lon"]), zoom=12, pitch=0),
             layers=layers,
-            tooltip={"text": "{name}{point}\nChainage: {chainage} m\nE: {x}\nN: {y}"},
+            tooltip={"text": "{point}\nChainage: {chainage} m\nE: {x}\nN: {y}"},
         ),
         use_container_width=True,
         height=height,
