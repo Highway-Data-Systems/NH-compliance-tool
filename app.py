@@ -222,15 +222,15 @@ def _ride_chart_png(ride_df: pd.DataFrame, tracks: list[str], ride_spec: dict, e
     pct80 = float(ride_spec["pct80_lt"])
     ymax = max(all_lt * 1.25, float(np.nanmax(y)) * 1.1 if y.size else all_lt, all_lt + 1.0)
     fig, ax = plt.subplots(figsize=(7.3, 2.9))
-    ax.axhspan(0, pct80, color="#dcfce7", zorder=0, label=f"Target < {pct80}")
-    ax.axhspan(pct80, all_lt, color="#fef9c3", zorder=0, label=f"Caution {pct80}-{all_lt}")
-    ax.axhspan(all_lt, ymax, color="#fee2e2", zorder=0, label=f"Non Compliant > {all_lt}")
+    ax.axhspan(0, pct80, color="#dcfce7", zorder=0, label=f"Target < {pct80} mm")
+    ax.axhspan(pct80, all_lt, color="#fef9c3", zorder=0, label=f"Caution {pct80}-{all_lt} mm")
+    ax.axhspan(all_lt, ymax, color="#fee2e2", zorder=0, label=f"Non Compliant > {all_lt} mm")
     ax.axhline(pct80, color="#ca8a04", lw=1.0, ls="--")
     ax.axhline(all_lt, color="#dc2626", lw=1.1, ls="--")
     for index, (start, end) in enumerate(exclusions or []):
         ax.axvspan(start, end, color="#6b7280", alpha=0.30, zorder=1,
                    label="Exclusions" if index == 0 else "_nolegend_")
-    ax.plot(x, y, color="#1d4ed8", lw=1.0, zorder=3, label="Combined UKRI")
+    ax.plot(x, y, color="#1d4ed8", lw=1.0, zorder=3, label="Combined UKRI (mm)")
     if x.size:
         ax.set_xlim(float(x.min()), float(x.max()))
     ax.set_ylim(0, ymax)
@@ -261,7 +261,7 @@ def _mpd_chart_png(mpd_df: pd.DataFrame, lines: list[str], mpd_spec: dict, exclu
     for index, (start, end) in enumerate(exclusions or []):
         ax.axvspan(start, end, color="#6b7280", alpha=0.30, zorder=1,
                    label="Exclusions" if index == 0 else "_nolegend_")
-    ax.plot(x, y, color="#7c3aed", lw=1.0, zorder=3, label="Combined MPD")
+    ax.plot(x, y, color="#7c3aed", lw=1.0, zorder=3, label="Combined MPD (mm)")
     if x.size:
         ax.set_xlim(float(x.min()), float(x.max()))
     ax.set_ylim(ymin, ymax)
