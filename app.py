@@ -227,8 +227,9 @@ def _ride_chart_png(ride_df: pd.DataFrame, tracks: list[str], ride_spec: dict, e
     ax.axhspan(all_lt, ymax, color="#fee2e2", zorder=0, label=f"Non Compliant > {all_lt}")
     ax.axhline(pct80, color="#ca8a04", lw=1.0, ls="--")
     ax.axhline(all_lt, color="#dc2626", lw=1.1, ls="--")
-    for start, end in exclusions or []:
-        ax.axvspan(start, end, color="#6b7280", alpha=0.30, zorder=1)
+    for index, (start, end) in enumerate(exclusions or []):
+        ax.axvspan(start, end, color="#6b7280", alpha=0.30, zorder=1,
+                   label="Exclusions" if index == 0 else "_nolegend_")
     ax.plot(x, y, color="#1d4ed8", lw=1.0, zorder=3, label="Combined UKRI")
     if x.size:
         ax.set_xlim(float(x.min()), float(x.max()))
@@ -237,7 +238,7 @@ def _ride_chart_png(ride_df: pd.DataFrame, tracks: list[str], ride_spec: dict, e
     ax.set_ylabel("UKRI", fontsize=8)
     ax.tick_params(labelsize=7)
     ax.grid(True, color="#e5e7eb", lw=0.5)
-    ax.legend(loc="upper right", fontsize=6, ncol=2, framealpha=0.85)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.25), fontsize=6, ncol=3, frameon=False)
     ax.set_title("Combined UKRI vs chainage with specification bands", fontsize=9)
     return _fig_to_png_bytes(fig)
 
@@ -257,8 +258,9 @@ def _mpd_chart_png(mpd_df: pd.DataFrame, lines: list[str], mpd_spec: dict, exclu
     ax.axhspan(avg_min, avg_max, color="#dcfce7", zorder=0, label=f"Spec range {avg_min}-{avg_max} mm")
     ax.axhline(avg_min, color="#16a34a", lw=1.0, ls="--")
     ax.axhline(avg_max, color="#16a34a", lw=1.0, ls="--")
-    for start, end in exclusions or []:
-        ax.axvspan(start, end, color="#6b7280", alpha=0.30, zorder=1)
+    for index, (start, end) in enumerate(exclusions or []):
+        ax.axvspan(start, end, color="#6b7280", alpha=0.30, zorder=1,
+                   label="Exclusions" if index == 0 else "_nolegend_")
     ax.plot(x, y, color="#7c3aed", lw=1.0, zorder=3, label="Combined MPD")
     if x.size:
         ax.set_xlim(float(x.min()), float(x.max()))
@@ -267,7 +269,7 @@ def _mpd_chart_png(mpd_df: pd.DataFrame, lines: list[str], mpd_spec: dict, exclu
     ax.set_ylabel("MPD (mm)", fontsize=8)
     ax.tick_params(labelsize=7)
     ax.grid(True, color="#e5e7eb", lw=0.5)
-    ax.legend(loc="upper right", fontsize=6, framealpha=0.85)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.25), fontsize=6, ncol=3, frameon=False)
     ax.set_title("Combined MPD vs chainage with specification range", fontsize=9)
     return _fig_to_png_bytes(fig)
 
@@ -304,13 +306,14 @@ def _comparison_chart_png(
             zorder=3,
             label="Primary",
         )
-    for start, end in exclusions or []:
-        ax.axvspan(start, end, color="#6b7280", alpha=0.20, zorder=0)
+    for index, (start, end) in enumerate(exclusions or []):
+        ax.axvspan(start, end, color="#6b7280", alpha=0.20, zorder=0,
+                   label="Exclusions" if index == 0 else "_nolegend_")
     ax.set_xlabel("Chainage (m)", fontsize=8)
     ax.set_ylabel(ylabel, fontsize=8)
     ax.tick_params(labelsize=7)
     ax.grid(True, color="#e5e7eb", lw=0.5)
-    ax.legend(loc="upper right", fontsize=7, framealpha=0.85)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.25), fontsize=7, ncol=3, frameon=False)
     ax.set_title(title, fontsize=9)
     return _fig_to_png_bytes(fig)
 
