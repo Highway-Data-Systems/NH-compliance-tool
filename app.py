@@ -235,7 +235,7 @@ def _ride_chart_png(ride_df: pd.DataFrame, tracks: list[str], ride_spec: dict, e
         ax.set_xlim(float(x.min()), float(x.max()))
     ax.set_ylim(0, ymax)
     ax.set_xlabel("Chainage (m)", fontsize=8)
-    ax.set_ylabel("UKRI", fontsize=8)
+    ax.set_ylabel("UKRI (mm)", fontsize=8)
     ax.tick_params(labelsize=7)
     ax.grid(True, color="#e5e7eb", lw=0.5)
     ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.25), fontsize=6, ncol=3, frameon=False)
@@ -909,7 +909,7 @@ def _pdf_comparison_report_bytes(
     ]
     story.extend([Paragraph("Comparison Summary", styles["Heading2"]), make_table(matched_rows, [26 * mm, 64 * mm, 28 * mm, 24 * mm, 24 * mm])])
 
-    ukri_chart = _comparison_chart_png(primary_ukri, comparison_ukri, "combined_ukri", "UKRI", "Combined UKRI Comparison", exclusions)
+    ukri_chart = _comparison_chart_png(primary_ukri, comparison_ukri, "combined_ukri", "UKRI (mm)", "Combined UKRI Comparison", exclusions)
     mpd_chart = _comparison_chart_png(primary_mpd, comparison_mpd, "combined_mpd_mm", "MPD (mm)", "Combined MPD Comparison", exclusions)
     if ukri_chart is not None or mpd_chart is not None:
         story.extend([Spacer(1, 10), Paragraph("Comparison Charts", styles["Heading2"])])
@@ -1120,7 +1120,8 @@ def _line_chart(
 ):
     chart_df = _with_nearest_location(df[[x, y]].dropna(), geometry_geo) if map_hover else df[[x, y]].dropna()
     hover_cols = ["x", "y", "lat", "lon"] if map_hover and {"x", "y", "lat", "lon"}.issubset(chart_df.columns) else None
-    fig = px.line(chart_df, x=x, y=y, title=title, hover_data=hover_cols)
+    labels = {y: "UKRI (mm)"} if y == "combined_ukri" or y.endswith("_ri") else {}
+    fig = px.line(chart_df, x=x, y=y, title=title, hover_data=hover_cols, labels=labels)
     for start, end in exclusions or []:
         fig.add_vrect(
             x0=start,
@@ -2004,6 +2005,7 @@ if tab_compare is not None:
                     y="combined_ukri",
                     color="dataset",
                     title="Combined UKRI comparison",
+                    labels={"combined_ukri": "UKRI (mm)"},
                 )
                 for start, end in exclusions:
                     fig.add_vrect(x0=start, x1=end, fillcolor="rgba(239, 68, 68, 0.14)", line_width=0)
