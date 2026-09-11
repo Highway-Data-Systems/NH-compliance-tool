@@ -290,7 +290,7 @@ def _comparison_chart_png(
         ax.plot(
             comparison["chainage"].to_numpy(dtype=float),
             comparison[metric].to_numpy(dtype=float),
-            color="#dc2626",
+            color="#636efa",
             lw=1.0,
             alpha=0.75,
             zorder=2,
@@ -300,7 +300,7 @@ def _comparison_chart_png(
         ax.plot(
             primary["chainage"].to_numpy(dtype=float),
             primary[metric].to_numpy(dtype=float),
-            color="#1d4ed8",
+            color="#22c55e",
             lw=1.0,
             alpha=0.75,
             zorder=3,
@@ -782,6 +782,7 @@ def _pdf_comparison_report_bytes(
     ride_tracks: list[str],
     mpd_lines: list[str],
     offset_m: float = 0.0,
+    resolution: str = "Automatic",
 ) -> bytes:
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
@@ -814,7 +815,7 @@ def _pdf_comparison_report_bytes(
         table_rows = []
         for row_index, row in enumerate(rows):
             style = styles["SmallHeader"] if row_index == 0 else styles["Small"]
-            table_rows.append([Paragraph(escape(_report_text(cell)), style) for cell in row])
+            table_rows.append([cell if isinstance(cell, Paragraph) else Paragraph(escape(_report_text(cell)), style) for cell in row])
         table = Table(table_rows, colWidths=widths, repeatRows=1)
         style = [
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f2937")),
@@ -835,26 +836,74 @@ def _pdf_comparison_report_bytes(
         table.setStyle(TableStyle(style))
         return table
 
-    def add_delta_section(title, delta_df, columns, units=""):
-        story.extend([PageBreak(), Paragraph(title, styles["Heading2"])])
+    def percentage_cell(value, is_mpd):
+        if pd.isna(value):
+            return "N/A"
+        positive, negative = ("#2563eb", "#facc15") if is_mpd else ("#15803d", "#dc2626")
+        colour = positive if value > 0 else negative if value < 0 else "#737373"
+        return Paragraph(f'<font color="{colour}"><b>{value:+.2f}%</b></font>', styles["Small"])
+
+    def comparison_values(delta, primary_col, pre_col, is_mpd):
+        if delta.empty:
+            return [float("nan")] * 4
+        percentages = _improvement_percent(delta[primary_col], delta[pre_col], is_mpd)
+        overall = _improvement_percent(pd.Series([delta[primary_col].mean()]),
+                                       pd.Series([delta[pre_col].mean()]), is_mpd).iloc[0]
+        return [overall, percentages.mean(), percentages.max(), percentages.min()]
+
+    def add_percentage_section(label, delta_df, primary_col, pre_col):
+        is_mpd = label == "MPD"
+        measure = "difference" if is_mpd else "improvement"
+        story.extend([PageBreak(), Paragraph(f"{label} {measure}", styles["Heading2"])])
         if delta_df.empty:
-            story.append(Paragraph("No matched comparison points were found.", styles["BodyText"]))
+            story.append(Paragraph("No matched comparison points were found within 5 m.", styles["BodyText"]))
             return
-        abs_delta = delta_df["delta"].abs()
-        unit_suffix = f" {units}" if units else ""
-        summary_rows = [
-            ["Matched points", f"{len(delta_df):,}"],
-            ["Mean delta", f"{delta_df['delta'].mean():.3f}{unit_suffix}"],
-            ["Median delta", f"{delta_df['delta'].median():.3f}{unit_suffix}"],
-            ["Max absolute delta", f"{abs_delta.max():.3f}{unit_suffix}"],
-            ["95th percentile absolute delta", f"{abs_delta.quantile(0.95):.3f}{unit_suffix}"],
-        ]
-        story.extend([make_table([["Measure", "Value"]] + summary_rows, [70 * mm, 96 * mm]), Spacer(1, 8)])
-        shown = delta_df[columns].head(500).copy()
-        rows = [columns] + [[_report_text(row.get(column), column) for column in columns] for _, row in shown.iterrows()]
-        story.append(make_table(rows, [doc.width / len(columns)] * len(columns), font_size=7))
-        if len(delta_df) > len(shown):
-            story.append(Paragraph(f"Showing first {len(shown):,} of {len(delta_df):,} matched points.", styles["Small"]))
+        span = float(delta_df["chainage"].max() - delta_df["chainage"].min() + 10)
+        section_m = 100 if resolution == "100 m" or (resolution == "Automatic" and span > 1000) else 10
+        table = _comparison_sections(delta_df, primary_col, pre_col, section_m)
+        table["percentage"] = _improvement_percent(table[primary_col], table[pre_col], is_mpd)
+        formula = "100 x (primary - pre) / pre" if is_mpd else "100 x (pre - primary) / pre"
+        meaning = ("Positive differences (higher MPD) are blue; negative differences (lower MPD) are yellow."
+                   if is_mpd else "Positive improvement (lower UKRI) is green; negative improvement (worse than pre) is red.")
+        story.append(Paragraph(f"{label} {measure} = {formula}. {meaning} "
+                               "Overall compares matched survey means; other summaries use 10 m percentages. "
+                               "All matched points are included, including exclusions.", styles["Small"]))
+        titles = [f"Overall {measure}", f"Mean 10 m {measure}",
+                  f"{'Maximum' if is_mpd else 'Best'} 10 m {measure}",
+                  f"{'Minimum' if is_mpd else 'Worst'} 10 m {measure}"]
+        rows = [["Measure", "Value"], ["Matched 10 m points", f"{len(delta_df):,}"]]
+        rows.extend([[title, percentage_cell(value, is_mpd)] for title, value in
+                     zip(titles, comparison_values(delta_df, primary_col, pre_col, is_mpd))])
+        story.extend([Spacer(1, 6), make_table(rows, [90 * mm, 76 * mm]), Spacer(1, 8)])
+        undefined = int((delta_df[pre_col] == 0).sum())
+        story.append(Paragraph(f"Zero pre values: {undefined:,}. Their percentages are unavailable and omitted "
+                               "from 10 m percentage summaries. Section percentages use section means.", styles["Small"]))
+        plt = _load_pyplot()
+        fig, ax = plt.subplots(figsize=(7.3, 2.9))
+        valid = table.dropna(subset=["percentage"])
+        x_col = "start_m" if section_m == 100 else "chainage"
+        positive, negative = ("#2563eb", "#facc15") if is_mpd else ("#15803d", "#dc2626")
+        ax.bar(valid[x_col], valid["percentage"], width=section_m * 0.85,
+               color=np.where(valid["percentage"] >= 0, positive, negative))
+        ax.axhline(0, color="#737373", lw=0.7)
+        ax.set_xlabel("Chainage (m)", fontsize=8)
+        ax.set_ylabel(f"{measure.capitalize()} (%)", fontsize=8)
+        ax.set_title(f"{label} {measure} ({section_m} m)", fontsize=9)
+        ax.tick_params(labelsize=7)
+        ax.grid(axis="y", color="#e5e7eb", lw=0.5)
+        ax.set_axisbelow(True)
+        story.extend([_png_flowable(_fig_to_png_bytes(fig), 176, 76), Spacer(1, 8)])
+        story.append(Paragraph(f"All {len(table):,} rows at {section_m} m resolution. "
+                               "100 m sections use matched-pair means in [start, end) bins. "
+                               "Matched count shows coverage, including partial sections.", styles["Small"]))
+        location_cols = ["start_m", "end_m"] if section_m == 100 else ["chainage"]
+        rows = [["Start (m)", "End (m)"] if section_m == 100 else ["Chainage (m)"]]
+        rows[0] += ["Primary (mm)", "Pre (mm)", "Matched count", f"{measure.capitalize()} (%)"]
+        for _, row in table.iterrows():
+            rows.append([f"{row[c]:,.1f}" for c in location_cols] +
+                        [f"{row[primary_col]:.3f}", f"{row[pre_col]:.3f}", str(int(row["matched_count"])),
+                         percentage_cell(row["percentage"], is_mpd)])
+        story.append(make_table(rows, [doc.width / len(rows[0])] * len(rows[0]), font_size=7))
 
     primary_name = primary.metadata.get("survey") or primary.metadata.get("file_name") or "Primary survey"
     comparison_name = comparison.metadata.get("survey") or comparison.metadata.get("file_name") or "Comparison/Pre survey"
@@ -890,24 +939,17 @@ def _pdf_comparison_report_bytes(
         rows.extend([[row["check"], row["primary"], row["comparison"], row["difference"], _display_status(row["status"])] for row in check_rows])
         story.extend([Paragraph("Route Checks", styles["Heading2"]), make_table(rows, [42 * mm, 38 * mm, 38 * mm, 30 * mm, 18 * mm]), Spacer(1, 8)])
 
-    matched_rows = [
-        ["Metric", "Matched selection", "Matched points", "Mean delta", "Max absolute delta"],
-        [
-            "UKRI",
-            ", ".join(ride_tracks) if ride_tracks else "No matching tracks",
-            f"{len(ukri_delta):,}" if not ukri_delta.empty else "0",
-            f"{ukri_delta['delta'].mean():.3f}" if not ukri_delta.empty else "-",
-            f"{ukri_delta['delta'].abs().max():.3f}" if not ukri_delta.empty else "-",
-        ],
-        [
-            "MPD",
-            ", ".join(mpd_lines) if mpd_lines else "No matching lines",
-            f"{len(mpd_delta):,}" if not mpd_delta.empty else "0",
-            f"{mpd_delta['delta'].mean():.3f} mm" if not mpd_delta.empty else "-",
-            f"{mpd_delta['delta'].abs().max():.3f} mm" if not mpd_delta.empty else "-",
-        ],
-    ]
-    story.extend([Paragraph("Comparison Summary", styles["Heading2"]), make_table(matched_rows, [26 * mm, 64 * mm, 28 * mm, 24 * mm, 24 * mm])])
+    matched_rows = [["Metric", "Matched selection", "Matched points", "Overall (%)", "Mean 10 m (%)"]]
+    for label, delta, primary_col, pre_col, selection in [
+        ("UKRI improvement", ukri_delta, "primary_ukri", "comparison_pre_ukri", ride_tracks),
+        ("MPD difference", mpd_delta, "primary_mpd_mm", "comparison_pre_mpd_mm", mpd_lines),
+    ]:
+        is_mpd = label.startswith("MPD")
+        values = comparison_values(delta, primary_col, pre_col, is_mpd)
+        matched_rows.append([label, ", ".join(selection) or "No matching selection", f"{len(delta):,}",
+                             percentage_cell(values[0], is_mpd), percentage_cell(values[1], is_mpd)])
+    story.extend([Paragraph("Comparison Summary", styles["Heading2"]),
+                  make_table(matched_rows, [32 * mm, 54 * mm, 28 * mm, 26 * mm, 26 * mm])])
 
     ukri_chart = _comparison_chart_png(primary_ukri, comparison_ukri, "combined_ukri", "UKRI (mm)", "Combined UKRI Comparison", exclusions)
     mpd_chart = _comparison_chart_png(primary_mpd, comparison_mpd, "combined_mpd_mm", "MPD (mm)", "Combined MPD Comparison", exclusions)
@@ -918,18 +960,8 @@ def _pdf_comparison_report_bytes(
         if mpd_chart is not None:
             story.extend([_png_flowable(mpd_chart, 176, 82), Spacer(1, 6)])
 
-    add_delta_section(
-        "UKRI Comparison Detail",
-        ukri_delta,
-        ["chainage", "primary_ukri", "comparison_pre_ukri", "delta"],
-    )
-
-    add_delta_section(
-        "MPD Comparison Detail",
-        mpd_delta,
-        ["chainage", "primary_mpd_mm", "comparison_pre_mpd_mm", "delta"],
-        units="mm",
-    )
+    add_percentage_section("UKRI", ukri_delta, "primary_ukri", "comparison_pre_ukri")
+    add_percentage_section("MPD", mpd_delta, "primary_mpd_mm", "comparison_pre_mpd_mm")
 
     def _draw_page_furniture(canvas, current_doc):
         canvas.saveState()
@@ -2077,6 +2109,11 @@ if tab_compare is not None:
         comp_ride = _apply_chainage_offset(comparison_survey.ride_10m, offset_m)
         comp_mpd = _apply_chainage_offset(comparison_survey.mpd_10m, offset_m)
 
+        comparison_resolution = st.radio(
+            "Comparison detail resolution", ["Automatic", "10 m", "100 m"], horizontal=True,
+            help="Automatic uses 100 m sections when the matched chainage span exceeds 1,000 m."
+        )
+
         try:
             comparison_report_name = survey.metadata.get("survey") or uploaded.name.rsplit(".", 1)[0]
             safe_comparison_report_name = _safe_filename(comparison_report_name, export_prefix)
@@ -2089,17 +2126,13 @@ if tab_compare is not None:
                     common_ukri_tracks,
                     common_mpd_lines,
                     offset_m,
+                    comparison_resolution,
                 ),
                 file_name=f"{safe_comparison_report_name}_comparison_report.pdf",
                 mime="application/pdf",
             )
         except ModuleNotFoundError:
             st.warning("PDF export needs the reportlab package. Run `pip install -r requirements.txt` and restart the app.")
-
-        comparison_resolution = st.radio(
-            "Comparison detail resolution", ["Automatic", "10 m", "100 m"], horizontal=True,
-            help="Automatic uses 100 m sections when the matched chainage span exceeds 1,000 m."
-        )
 
         if common_ukri_tracks:
             st.markdown("**Combined UKRI Comparison**")
