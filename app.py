@@ -1443,6 +1443,68 @@ def _comparison_delta(primary: pd.DataFrame, comparison: pd.DataFrame, metric: s
     return merged
 
 
+def _comparison_sections(delta, primary_col, pre_col, section_m):
+    """Average matched pairs together before calculating change from pre."""
+    result = delta[["chainage", primary_col, pre_col]].copy()
+    if section_m == 100:
+        result["start_m"] = np.floor(result["chainage"] / 100) * 100
+        result = result.groupby("start_m", as_index=False).agg(
+            **{primary_col: (primary_col, "mean"), pre_col: (pre_col, "mean"),
+               "matched_count": ("chainage", "size")}
+        )
+        result.insert(1, "end_m", result["start_m"] + 100)
+    else:
+        result["matched_count"] = 1
+    result["change_mm"] = result[primary_col] - result[pre_col]
+    result["change_pct"] = result["change_mm"].div(result[pre_col].where(result[pre_col] != 0)) * 100
+    return result
+
+
+def _show_comparison_analysis(delta, primary_col, pre_col, label, resolution):
+    if delta.empty:
+        st.info(f"No matched {label} points were found within 5 m.")
+        return
+    span = float(delta["chainage"].max() - delta["chainage"].min() + 10)
+    section_m = 100 if resolution == "100 m" or (resolution == "Automatic" and span > 1000) else 10
+    table = _comparison_sections(delta, primary_col, pre_col, section_m)
+    raw = _comparison_sections(delta, primary_col, pre_col, 10)
+    pre_mean = raw[pre_col].mean()
+    primary_mean = raw[primary_col].mean()
+    overall_pct = (primary_mean - pre_mean) / pre_mean * 100 if pre_mean != 0 else None
+    cols = st.columns(4)
+    cols[0].metric("Matched 10 m points", f"{len(raw):,}")
+    cols[1].metric("Pre mean", f"{pre_mean:.3f} mm")
+    cols[2].metric("Primary mean", f"{primary_mean:.3f} mm")
+    cols[3].metric("Change in mean", f"{overall_pct:+.2f}%" if overall_pct is not None else "N/A")
+    cols = st.columns(3)
+    cols[0].metric("Mean change (primary − pre)", f"{raw['change_mm'].mean():+.3f} mm")
+    cols[1].metric("Mean absolute difference", f"{raw['change_mm'].abs().mean():.3f} mm")
+    cols[2].metric("Maximum absolute difference", f"{raw['change_mm'].abs().max():.3f} mm")
+    st.caption("Summaries use all matched 10 m points, including exclusions. Percentage change = "
+               "100 × (primary − pre) / pre; change in mean uses matched survey means. "
+               "Positive means primary is higher, which does not necessarily mean improvement.")
+    undefined = int(raw['change_pct'].isna().sum())
+    if undefined:
+        st.caption(f"{undefined:,} points have a zero pre value; their percentage change is unavailable.")
+    x_col = "start_m" if section_m == 100 else "chainage"
+    fig = px.line(table, x=x_col, y="change_pct", title=f"{label} percentage change ({section_m} m)",
+                  labels={x_col: "Chainage (m)", "change_pct": "Change from pre (%)"})
+    fig.add_hline(y=0, line_dash="dash")
+    st.plotly_chart(fig, use_container_width=True)
+    fig = px.histogram(raw.dropna(subset=["change_pct"]), x="change_pct", nbins=40,
+                       title=f"{label} distribution of 10 m percentage changes",
+                       labels={"change_pct": "Change from pre (%)"})
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption(f"Showing all {len(table):,} rows at {section_m} m resolution. "
+               "100 m sections use matched-pair means in [start, end) chainage bins; "
+               "matched_count shows coverage, including partial sections.")
+    # Avoid pandas Styler's cell limit on large datasets.
+    st.dataframe(table, use_container_width=True, hide_index=True)
+    st.download_button(f"Download {label} table CSV", table.to_csv(index=False).encode("utf-8"),
+                       file_name=f"{label.lower()}_comparison_{section_m}m.csv", mime="text/csv",
+                       key=f"{label}_comparison_csv")
+
+
 def _overall_results(
     survey,
     ride_spec: dict,
@@ -2000,6 +2062,11 @@ if tab_compare is not None:
         except ModuleNotFoundError:
             st.warning("PDF export needs the reportlab package. Run `pip install -r requirements.txt` and restart the app.")
 
+        comparison_resolution = st.radio(
+            "Comparison detail resolution", ["Automatic", "10 m", "100 m"], horizontal=True,
+            help="Automatic uses 100 m sections when the matched chainage span exceeds 1,000 m."
+        )
+
         if common_ukri_tracks:
             st.markdown("**Combined UKRI Comparison**")
             primary_ukri = _combined_ukri_chart_data(survey.ride_10m, common_ukri_tracks)
@@ -2027,12 +2094,7 @@ if tab_compare is not None:
                 st.plotly_chart(fig, use_container_width=True)
 
             ukri_delta = _comparison_delta(primary_ukri, comparison_ukri, "combined_ukri", "primary_ukri", "comparison_ukri")
-            if not ukri_delta.empty:
-                d1, d2, d3 = st.columns(3)
-                d1.metric("Matched UKRI points", f"{len(ukri_delta):,}")
-                d2.metric("Mean delta", f"{ukri_delta['delta'].mean():.3f}")
-                d3.metric("Max abs delta", f"{ukri_delta['delta'].abs().max():.3f}")
-                st.dataframe(_format_table(ukri_delta.head(500)), use_container_width=True, hide_index=True)
+            _show_comparison_analysis(ukri_delta, "primary_ukri", "comparison_ukri", "UKRI", comparison_resolution)
         elif not survey.ride_10m.empty or not comparison_survey.ride_10m.empty:
             st.info("No matching UKRI tracks were found for comparison.")
 
@@ -2062,12 +2124,7 @@ if tab_compare is not None:
                 st.plotly_chart(fig, use_container_width=True)
 
             mpd_delta = _comparison_delta(primary_mpd, comparison_mpd, "combined_mpd_mm", "primary_mpd_mm", "comparison_mpd_mm")
-            if not mpd_delta.empty:
-                d1, d2, d3 = st.columns(3)
-                d1.metric("Matched MPD points", f"{len(mpd_delta):,}")
-                d2.metric("Mean delta", f"{mpd_delta['delta'].mean():.3f} mm")
-                d3.metric("Max abs delta", f"{mpd_delta['delta'].abs().max():.3f} mm")
-                st.dataframe(_format_table(mpd_delta.head(500)), use_container_width=True, hide_index=True)
+            _show_comparison_analysis(mpd_delta, "primary_mpd_mm", "comparison_mpd_mm", "MPD", comparison_resolution)
         elif not survey.mpd_10m.empty or not comparison_survey.mpd_10m.empty:
             st.info("No matching MPD tracks were found for comparison.")
 
