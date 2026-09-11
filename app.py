@@ -1465,8 +1465,8 @@ def _improvement_percent(primary, pre, higher_is_better):
     return direction * (primary - pre).div(pre.where(pre != 0)) * 100
 
 
-def _improvement_metric(column, title, value):
-    colour = "#15803d" if pd.notna(value) and value > 0 else "#dc2626" if pd.notna(value) and value < 0 else "#737373"
+def _improvement_metric(column, title, value, positive_colour="#15803d", negative_colour="#dc2626"):
+    colour = positive_colour if pd.notna(value) and value > 0 else negative_colour if pd.notna(value) and value < 0 else "#737373"
     text = f"{value:+.2f}%" if pd.notna(value) else "N/A"
     column.markdown(
         f'<div>{escape(title)}</div><div style="font-size:2rem;color:{colour};font-weight:600">{text}</div>',
@@ -1482,40 +1482,48 @@ def _show_comparison_analysis(delta, primary_col, pre_col, label, resolution):
     section_m = 100 if resolution == "100 m" or (resolution == "Automatic" and span > 1000) else 10
     table = _comparison_sections(delta, primary_col, pre_col, section_m)
     raw = _comparison_sections(delta, primary_col, pre_col, 10)
-    higher_is_better = label == "MPD"
+    is_mpd = label == "MPD"
+    measure = "difference" if is_mpd else "improvement"
+    pct_col = f"{measure}_pct"
+    positive_colour, negative_colour = ("#2563eb", "#facc15") if is_mpd else ("#15803d", "#dc2626")
+    positive_label, negative_label = ("Positive difference", "Negative difference") if is_mpd else ("Improved", "Worse")
     for frame in (table, raw):
-        frame["improvement_pct"] = _improvement_percent(frame[primary_col], frame[pre_col], higher_is_better)
+        frame[pct_col] = _improvement_percent(frame[primary_col], frame[pre_col], is_mpd)
         frame.drop(columns=["change_mm", "change_pct"], inplace=True)
     overall_pct = _improvement_percent(
-        pd.Series([raw[primary_col].mean()]), pd.Series([raw[pre_col].mean()]), higher_is_better
+        pd.Series([raw[primary_col].mean()]), pd.Series([raw[pre_col].mean()]), is_mpd
     ).iloc[0]
     st.metric("Matched 10 m points", f"{len(raw):,}")
     cols = st.columns(4)
-    _improvement_metric(cols[0], "Overall improvement (%)", overall_pct)
-    _improvement_metric(cols[1], "Mean 10 m improvement (%)", raw["improvement_pct"].mean())
-    _improvement_metric(cols[2], "Best 10 m improvement (%)", raw["improvement_pct"].max())
-    _improvement_metric(cols[3], "Worst 10 m improvement (%)", raw["improvement_pct"].min())
-    formula = "(primary - pre) / pre" if higher_is_better else "(pre - primary) / pre"
-    direction = "Higher MPD" if higher_is_better else "Lower UKRI"
-    st.caption(f"{direction} is treated as improvement: 100 x {formula}. "
-               "Positive improvement is green; negative improvement (worse than pre) is red. "
-               "Overall improvement compares matched survey means; the other summaries use 10 m percentages. "
-               "All matched points are included, including exclusions.")
-    if higher_is_better:
-        st.caption("MPD improvement here means increased texture depth; specification compliance is assessed separately.")
-    undefined = int(raw['improvement_pct'].isna().sum())
+    titles = [f"Overall {measure} (%)", f"Mean 10 m {measure} (%)",
+              f"{'Maximum' if is_mpd else 'Best'} 10 m {measure} (%)",
+              f"{'Minimum' if is_mpd else 'Worst'} 10 m {measure} (%)"]
+    values = [overall_pct, raw[pct_col].mean(), raw[pct_col].max(), raw[pct_col].min()]
+    for column, title, value in zip(cols, titles, values):
+        _improvement_metric(column, title, value, positive_colour, negative_colour)
+    if is_mpd:
+        st.caption("MPD difference = 100 x (primary - pre) / pre. "
+                   "Positive differences (higher MPD) are blue; negative differences (lower MPD) are yellow. "
+                   "Overall difference compares matched survey means; the other summaries use 10 m percentages. "
+                   "All matched points are included, including exclusions.")
+    else:
+        st.caption("Lower UKRI is treated as improvement: 100 x (pre - primary) / pre. "
+                   "Positive improvement is green; negative improvement (worse than pre) is red. "
+                   "Overall improvement compares matched survey means; the other summaries use 10 m percentages. "
+                   "All matched points are included, including exclusions.")
+    undefined = int(raw[pct_col].isna().sum())
     if undefined:
-        st.caption(f"{undefined:,} points have a zero pre value; their improvement percentage is unavailable and omitted from percentage summaries.")
+        st.caption(f"{undefined:,} points have a zero pre value; their {measure} percentage is unavailable and omitted from percentage summaries.")
     x_col = "start_m" if section_m == 100 else "chainage"
-    chart = table.dropna(subset=["improvement_pct"]).copy()
+    chart = table.dropna(subset=[pct_col]).copy()
     chart["Outcome"] = np.select(
-        [chart["improvement_pct"] > 0, chart["improvement_pct"] < 0],
-        ["Improved", "Worse"], default="Unchanged"
+        [chart[pct_col] > 0, chart[pct_col] < 0],
+        [positive_label, negative_label], default="Unchanged"
     )
-    fig = px.bar(chart, x=x_col, y="improvement_pct", color="Outcome",
-                 color_discrete_map={"Improved": "#15803d", "Worse": "#dc2626", "Unchanged": "#737373"},
-                 title=f"{label} improvement ({section_m} m)",
-                 labels={x_col: "Chainage (m)", "improvement_pct": "Improvement (%)"},
+    fig = px.bar(chart, x=x_col, y=pct_col, color="Outcome",
+                 color_discrete_map={positive_label: positive_colour, negative_label: negative_colour, "Unchanged": "#737373"},
+                 title=f"{label} {measure} ({section_m} m)",
+                 labels={x_col: "Chainage (m)", pct_col: f"{measure.capitalize()} (%)"},
                  hover_data=["matched_count"])
     fig.update_traces(width=section_m * 0.85)
     fig.add_hline(y=0, line_color="#737373")
@@ -1525,7 +1533,7 @@ def _show_comparison_analysis(delta, primary_col, pre_col, label, resolution):
                "100 m sections use matched-pair means in [start, end) chainage bins; "
                "matched_count shows coverage, including partial sections.")
     st.dataframe(table, use_container_width=True, hide_index=True,
-                 column_config={"improvement_pct": st.column_config.NumberColumn("Improvement (%)", format="%.2f%%")})
+                 column_config={pct_col: st.column_config.NumberColumn(f"{measure.capitalize()} (%)", format="%.2f%%")})
     st.download_button(f"Download {label} table CSV", table.to_csv(index=False).encode("utf-8"),
                        file_name=f"{label.lower()}_comparison_{section_m}m.csv", mime="text/csv",
                        key=f"{label}_comparison_csv")
@@ -2110,7 +2118,7 @@ if tab_compare is not None:
                     x="chainage",
                     y="combined_ukri",
                     color="dataset",
-                    color_discrete_map={"Primary": "#15803d", "Comparison/Pre": "#636efa"},
+                    color_discrete_map={"Primary": "#22c55e", "Comparison/Pre": "#636efa"},
                     title="Combined UKRI comparison",
                     labels={"combined_ukri": "UKRI (mm)"},
                 )
@@ -2142,7 +2150,7 @@ if tab_compare is not None:
                     x="chainage",
                     y="combined_mpd_mm",
                     color="dataset",
-                    color_discrete_map={"Primary": "#15803d", "Comparison/Pre": "#636efa"},
+                    color_discrete_map={"Primary": "#22c55e", "Comparison/Pre": "#636efa"},
                     title="Combined MPD comparison",
                 )
                 for start, end in exclusions:
