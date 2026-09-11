@@ -1460,6 +1460,20 @@ def _comparison_sections(delta, primary_col, pre_col, section_m):
     return result
 
 
+def _improvement_percent(primary, pre, higher_is_better):
+    direction = 1 if higher_is_better else -1
+    return direction * (primary - pre).div(pre.where(pre != 0)) * 100
+
+
+def _improvement_metric(column, title, value):
+    colour = "#15803d" if pd.notna(value) and value > 0 else "#dc2626" if pd.notna(value) and value < 0 else "#737373"
+    text = f"{value:+.2f}%" if pd.notna(value) else "N/A"
+    column.markdown(
+        f'<div>{escape(title)}</div><div style="font-size:2rem;color:{colour};font-weight:600">{text}</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def _show_comparison_analysis(delta, primary_col, pre_col, label, resolution):
     if delta.empty:
         st.info(f"No matched {label} points were found within 5 m.")
@@ -1468,38 +1482,50 @@ def _show_comparison_analysis(delta, primary_col, pre_col, label, resolution):
     section_m = 100 if resolution == "100 m" or (resolution == "Automatic" and span > 1000) else 10
     table = _comparison_sections(delta, primary_col, pre_col, section_m)
     raw = _comparison_sections(delta, primary_col, pre_col, 10)
-    pre_mean = raw[pre_col].mean()
-    primary_mean = raw[primary_col].mean()
-    overall_pct = (primary_mean - pre_mean) / pre_mean * 100 if pre_mean != 0 else None
+    higher_is_better = label == "MPD"
+    for frame in (table, raw):
+        frame["improvement_pct"] = _improvement_percent(frame[primary_col], frame[pre_col], higher_is_better)
+        frame.drop(columns=["change_mm", "change_pct"], inplace=True)
+    overall_pct = _improvement_percent(
+        pd.Series([raw[primary_col].mean()]), pd.Series([raw[pre_col].mean()]), higher_is_better
+    ).iloc[0]
+    st.metric("Matched 10 m points", f"{len(raw):,}")
     cols = st.columns(4)
-    cols[0].metric("Matched 10 m points", f"{len(raw):,}")
-    cols[1].metric("Pre mean", f"{pre_mean:.3f} mm")
-    cols[2].metric("Primary mean", f"{primary_mean:.3f} mm")
-    cols[3].metric("Change in mean", f"{overall_pct:+.2f}%" if overall_pct is not None else "N/A")
-    cols = st.columns(3)
-    cols[0].metric("Mean change (primary − pre)", f"{raw['change_mm'].mean():+.3f} mm")
-    cols[1].metric("Mean absolute difference", f"{raw['change_mm'].abs().mean():.3f} mm")
-    cols[2].metric("Maximum absolute difference", f"{raw['change_mm'].abs().max():.3f} mm")
-    st.caption("Summaries use all matched 10 m points, including exclusions. Percentage change = "
-               "100 × (primary − pre) / pre; change in mean uses matched survey means. "
-               "Positive means primary is higher, which does not necessarily mean improvement.")
-    undefined = int(raw['change_pct'].isna().sum())
+    _improvement_metric(cols[0], "Overall improvement (%)", overall_pct)
+    _improvement_metric(cols[1], "Mean 10 m improvement (%)", raw["improvement_pct"].mean())
+    _improvement_metric(cols[2], "Best 10 m improvement (%)", raw["improvement_pct"].max())
+    _improvement_metric(cols[3], "Worst 10 m improvement (%)", raw["improvement_pct"].min())
+    formula = "(primary - pre) / pre" if higher_is_better else "(pre - primary) / pre"
+    direction = "Higher MPD" if higher_is_better else "Lower UKRI"
+    st.caption(f"{direction} is treated as improvement: 100 x {formula}. "
+               "Positive improvement is green; negative improvement (worse than pre) is red. "
+               "Overall improvement compares matched survey means; the other summaries use 10 m percentages. "
+               "All matched points are included, including exclusions.")
+    if higher_is_better:
+        st.caption("MPD improvement here means increased texture depth; specification compliance is assessed separately.")
+    undefined = int(raw['improvement_pct'].isna().sum())
     if undefined:
-        st.caption(f"{undefined:,} points have a zero pre value; their percentage change is unavailable.")
+        st.caption(f"{undefined:,} points have a zero pre value; their improvement percentage is unavailable and omitted from percentage summaries.")
     x_col = "start_m" if section_m == 100 else "chainage"
-    fig = px.line(table, x=x_col, y="change_pct", title=f"{label} percentage change ({section_m} m)",
-                  labels={x_col: "Chainage (m)", "change_pct": "Change from pre (%)"})
-    fig.add_hline(y=0, line_dash="dash")
-    st.plotly_chart(fig, use_container_width=True)
-    fig = px.histogram(raw.dropna(subset=["change_pct"]), x="change_pct", nbins=40,
-                       title=f"{label} distribution of 10 m percentage changes",
-                       labels={"change_pct": "Change from pre (%)"})
+    chart = table.dropna(subset=["improvement_pct"]).copy()
+    chart["Outcome"] = np.select(
+        [chart["improvement_pct"] > 0, chart["improvement_pct"] < 0],
+        ["Improved", "Worse"], default="Unchanged"
+    )
+    fig = px.bar(chart, x=x_col, y="improvement_pct", color="Outcome",
+                 color_discrete_map={"Improved": "#15803d", "Worse": "#dc2626", "Unchanged": "#737373"},
+                 title=f"{label} improvement ({section_m} m)",
+                 labels={x_col: "Chainage (m)", "improvement_pct": "Improvement (%)"},
+                 hover_data=["matched_count"])
+    fig.update_traces(width=section_m * 0.85)
+    fig.add_hline(y=0, line_color="#737373")
+    fig.update_layout(barmode="overlay", height=360)
     st.plotly_chart(fig, use_container_width=True)
     st.caption(f"Showing all {len(table):,} rows at {section_m} m resolution. "
                "100 m sections use matched-pair means in [start, end) chainage bins; "
                "matched_count shows coverage, including partial sections.")
-    # Avoid pandas Styler's cell limit on large datasets.
-    st.dataframe(table, use_container_width=True, hide_index=True)
+    st.dataframe(table, use_container_width=True, hide_index=True,
+                 column_config={"improvement_pct": st.column_config.NumberColumn("Improvement (%)", format="%.2f%%")})
     st.download_button(f"Download {label} table CSV", table.to_csv(index=False).encode("utf-8"),
                        file_name=f"{label.lower()}_comparison_{section_m}m.csv", mime="text/csv",
                        key=f"{label}_comparison_csv")
@@ -2084,6 +2110,7 @@ if tab_compare is not None:
                     x="chainage",
                     y="combined_ukri",
                     color="dataset",
+                    color_discrete_map={"Primary": "#15803d", "Comparison/Pre": "#636efa"},
                     title="Combined UKRI comparison",
                     labels={"combined_ukri": "UKRI (mm)"},
                 )
@@ -2115,6 +2142,7 @@ if tab_compare is not None:
                     x="chainage",
                     y="combined_mpd_mm",
                     color="dataset",
+                    color_discrete_map={"Primary": "#15803d", "Comparison/Pre": "#636efa"},
                     title="Combined MPD comparison",
                 )
                 for start, end in exclusions:
