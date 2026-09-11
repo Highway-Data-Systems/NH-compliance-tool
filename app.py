@@ -300,7 +300,7 @@ def _comparison_chart_png(
         ax.plot(
             primary["chainage"].to_numpy(dtype=float),
             primary[metric].to_numpy(dtype=float),
-            color="#22c55e",
+            color="#15803d",
             lw=1.0,
             alpha=0.75,
             zorder=3,
@@ -839,7 +839,7 @@ def _pdf_comparison_report_bytes(
     def percentage_cell(value, is_mpd):
         if pd.isna(value):
             return "N/A"
-        positive, negative = ("#2563eb", "#facc15") if is_mpd else ("#15803d", "#dc2626")
+        positive, negative = ("#2563eb", "#a16207") if is_mpd else ("#15803d", "#dc2626")
         colour = positive if value > 0 else negative if value < 0 else "#737373"
         return Paragraph(f'<font color="{colour}"><b>{value:+.2f}%</b></font>', styles["Small"])
 
@@ -882,7 +882,7 @@ def _pdf_comparison_report_bytes(
         fig, ax = plt.subplots(figsize=(7.3, 2.9))
         valid = table.dropna(subset=["percentage"])
         x_col = "start_m" if section_m == 100 else "chainage"
-        positive, negative = ("#2563eb", "#facc15") if is_mpd else ("#15803d", "#dc2626")
+        positive, negative = ("#2563eb", "#a16207") if is_mpd else ("#15803d", "#dc2626")
         ax.bar(valid[x_col], valid["percentage"], width=section_m * 0.85,
                color=np.where(valid["percentage"] >= 0, positive, negative))
         ax.axhline(0, color="#737373", lw=0.7)
@@ -1685,7 +1685,7 @@ with st.sidebar:
     st.divider()
     uploaded = st.file_uploader("Load BCD or RCD", type=["bcd", "rcd", "txt"])
     comparison_uploaded = st.file_uploader(
-        "Optional comparison BCD or RCD",
+        "Optional comparison BCD or RCD (Pre Survey)",
         type=["bcd", "rcd", "txt"],
         help="Load a second survey for pre/post or repeat-run comparison.",
     )
