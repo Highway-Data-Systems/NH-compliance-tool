@@ -212,9 +212,10 @@ def _fig_to_png_bytes(fig, dpi: int = 150, tight: bool = True) -> bytes:
 
 
 def _ride_chart_png(ride_df: pd.DataFrame, tracks: list[str], ride_spec: dict, exclusions: list[tuple[float, float]]):
-    data = _combined_ukri_chart_data(ride_df, tracks)
+    data = _combined_ukri_chart_data(ride_df, tracks, show_range=True)
     if data.empty:
         return None
+    data = data[data["Track statistic"] == "Maximum"]
     plt = _load_pyplot()
     x = data["chainage"].to_numpy(dtype=float)
     y = data["combined_ukri"].to_numpy(dtype=float)
@@ -230,7 +231,7 @@ def _ride_chart_png(ride_df: pd.DataFrame, tracks: list[str], ride_spec: dict, e
     for index, (start, end) in enumerate(exclusions or []):
         ax.axvspan(start, end, color="#6b7280", alpha=0.30, zorder=1,
                    label="Exclusions" if index == 0 else "_nolegend_")
-    ax.plot(x, y, color="#1d4ed8", lw=1.0, zorder=3, label="Combined UKRI (mm)")
+    ax.plot(x, y, color="#1d4ed8", lw=1.0, zorder=3, label="Maximum track UKRI (mm)")
     if x.size:
         ax.set_xlim(float(x.min()), float(x.max()))
     ax.set_ylim(0, ymax)
@@ -239,7 +240,7 @@ def _ride_chart_png(ride_df: pd.DataFrame, tracks: list[str], ride_spec: dict, e
     ax.tick_params(labelsize=7)
     ax.grid(True, color="#e5e7eb", lw=0.5)
     ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.25), fontsize=6, ncol=3, frameon=False)
-    ax.set_title("Combined UKRI vs chainage with specification bands", fontsize=9)
+    ax.set_title("Maximum UKRI across selected tracks by chainage", fontsize=9)
     return _fig_to_png_bytes(fig)
 
 
