@@ -1163,10 +1163,12 @@ def _line_chart(
     selected_chainage: float | None = None,
     marker_key: str | None = None,
 ):
-    chart_df = _with_nearest_location(df[[x, y]].dropna(), geometry_geo) if map_hover else df[[x, y]].dropna()
+    series_col = "Track statistic" if "Track statistic" in df.columns else None
+    columns = [x, y] + ([series_col] if series_col else [])
+    chart_df = _with_nearest_location(df[columns].dropna(), geometry_geo) if map_hover else df[columns].dropna()
     hover_cols = ["x", "y", "lat", "lon"] if map_hover and {"x", "y", "lat", "lon"}.issubset(chart_df.columns) else None
     labels = {y: "UKRI (mm)"} if y == "combined_ukri" or y.endswith("_ri") else {}
-    fig = px.line(chart_df, x=x, y=y, title=title, hover_data=hover_cols, labels=labels)
+    fig = px.line(chart_df, x=x, y=y, color=series_col, title=title, hover_data=hover_cols, labels=labels)
     for start, end in exclusions or []:
         fig.add_vrect(
             x0=start,
@@ -1259,14 +1261,21 @@ def _ukri_track_label(column: str) -> str:
     return labels.get(column, column)
 
 
-def _combined_ukri_chart_data(ride_df: pd.DataFrame, track_columns: list[str]) -> pd.DataFrame:
+def _combined_ukri_chart_data(ride_df: pd.DataFrame, track_columns: list[str], show_range: bool = False) -> pd.DataFrame:
     if ride_df.empty or not track_columns:
         return pd.DataFrame()
     existing_columns = [column for column in track_columns if column in ride_df.columns]
     if not existing_columns:
         return pd.DataFrame()
     chart_df = ride_df[["chainage"] + existing_columns].copy()
-    chart_df["combined_ukri"] = chart_df[existing_columns].replace(0, np.nan).mean(axis=1)
+    values = chart_df[existing_columns].replace(0, np.nan)
+    if show_range:
+        chart_df["Minimum"] = values.min(axis=1)
+        chart_df["Maximum"] = values.max(axis=1)
+        return chart_df[["chainage", "Minimum", "Maximum"]].melt(
+            id_vars="chainage", var_name="Track statistic", value_name="combined_ukri"
+        ).dropna(subset=["combined_ukri"])
+    chart_df["combined_ukri"] = values.mean(axis=1)
     return chart_df[["chainage", "combined_ukri"]].dropna()
 
 
@@ -1905,12 +1914,16 @@ with tab_ride:
             st.info("No derived 10 m ride table was found in this file.")
     else:
         side_options = selected_ukri_tracks
-        combined_ride = _combined_ukri_chart_data(survey.ride_10m, side_options)
+        show_average_ukri = st.toggle(
+            "Show average UKRI", value=False,
+            help="Off shows the minimum and maximum of the selected tracks at each chainage. On shows their average."
+        )
+        combined_ride = _combined_ukri_chart_data(survey.ride_10m, side_options, show_range=not show_average_ukri)
         metric = "combined_ukri"
         ride_results = nh_parser.evaluate_ride_combined(survey.ride_10m, side_options, ride_spec, exclusions)
         chart_data = combined_ride
         chart_y = "combined_ukri"
-        chart_title = "Combined UKRI by chainage"
+        chart_title = "Combined UKRI by chainage - " + ("average" if show_average_ukri else "minimum and maximum")
         marker_key = "ride_marker_combined_ukri"
 
         pass_count = int((ride_results["status"] == "PASS").sum()) if not ride_results.empty else 0
