@@ -1507,16 +1507,16 @@ def _improvement_percent(primary, pre, higher_is_better):
     return direction * (primary - pre).div(pre.where(pre != 0)) * 100
 
 
-def _improvement_metric(column, title, value, positive_colour="#15803d", negative_colour="#dc2626"):
+def _improvement_metric(column, title, value, positive_colour="#15803d", negative_colour="#dc2626", unit="%"):
     colour = positive_colour if pd.notna(value) and value > 0 else negative_colour if pd.notna(value) and value < 0 else "#737373"
-    text = f"{value:+.2f}%" if pd.notna(value) else "N/A"
+    text = (f"{value:+.2f}%" if unit == "%" else f"{value:+.3f} {unit}") if pd.notna(value) else "N/A"
     column.markdown(
         f'<div>{escape(title)}</div><div style="font-size:2rem;color:{colour};font-weight:600">{text}</div>',
         unsafe_allow_html=True,
     )
 
 
-def _show_comparison_analysis(delta, primary_col, pre_col, label, resolution):
+def _show_comparison_analysis(delta, primary_col, pre_col, label, resolution, show_percentage=True):
     if delta.empty:
         st.info(f"No matched {label} points were found within 5 m.")
         return
@@ -1526,46 +1526,46 @@ def _show_comparison_analysis(delta, primary_col, pre_col, label, resolution):
     raw = _comparison_sections(delta, primary_col, pre_col, 10)
     is_mpd = label == "MPD"
     measure = "difference" if is_mpd else "improvement"
-    pct_col = f"{measure}_pct"
+    unit = "%" if show_percentage else "mm"
+    value_col = f"{measure}_pct" if show_percentage else f"{measure}_mm"
     positive_colour, negative_colour = ("#2563eb", "#facc15") if is_mpd else ("#15803d", "#dc2626")
     positive_label, negative_label = ("Positive difference", "Negative difference") if is_mpd else ("Improved", "Worse")
     for frame in (table, raw):
-        frame[pct_col] = _improvement_percent(frame[primary_col], frame[pre_col], is_mpd)
+        frame[value_col] = (_improvement_percent(frame[primary_col], frame[pre_col], is_mpd)
+                            if show_percentage else (1 if is_mpd else -1) * (frame[primary_col] - frame[pre_col]))
         frame.drop(columns=["change_mm", "change_pct"], inplace=True)
-    overall_pct = _improvement_percent(
+    overall_value = _improvement_percent(
         pd.Series([raw[primary_col].mean()]), pd.Series([raw[pre_col].mean()]), is_mpd
-    ).iloc[0]
+    ).iloc[0] if show_percentage else raw[value_col].mean()
     st.metric("Matched 10 m points", f"{len(raw):,}")
     cols = st.columns(4)
-    titles = [f"Overall {measure} (%)", f"Mean 10 m {measure} (%)",
-              f"{'Maximum' if is_mpd else 'Best'} 10 m {measure} (%)",
-              f"{'Minimum' if is_mpd else 'Worst'} 10 m {measure} (%)"]
-    values = [overall_pct, raw[pct_col].mean(), raw[pct_col].max(), raw[pct_col].min()]
+    titles = [f"Overall {measure} ({unit})", f"Mean 10 m {measure} ({unit})",
+              f"{'Maximum' if is_mpd else 'Best'} 10 m {measure} ({unit})",
+              f"{'Minimum' if is_mpd else 'Worst'} 10 m {measure} ({unit})"]
+    values = [overall_value, raw[value_col].mean(), raw[value_col].max(), raw[value_col].min()]
     for column, title, value in zip(cols, titles, values):
-        _improvement_metric(column, title, value, positive_colour, negative_colour)
-    if is_mpd:
-        st.caption("MPD difference = 100 x (primary - pre) / pre. "
-                   "Positive differences (higher MPD) are blue; negative differences (lower MPD) are yellow. "
-                   "Overall difference compares matched survey means; the other summaries use 10 m percentages. "
-                   "All matched points are included, including exclusions.")
-    else:
-        st.caption("Lower UKRI is treated as improvement: 100 x (pre - primary) / pre. "
-                   "Positive improvement is green; negative improvement (worse than pre) is red. "
-                   "Overall improvement compares matched survey means; the other summaries use 10 m percentages. "
-                   "All matched points are included, including exclusions.")
-    undefined = int(raw[pct_col].isna().sum())
-    if undefined:
+        _improvement_metric(column, title, value, positive_colour, negative_colour, unit)
+    formula = "primary - pre" if is_mpd else "pre - primary"
+    if show_percentage:
+        formula = f"100 x ({formula}) / pre"
+    meaning = ("Positive differences (higher MPD) are blue; negative differences (lower MPD) are yellow."
+               if is_mpd else "Positive improvement (lower UKRI) is green; negative improvement (worse than pre) is red.")
+    st.caption(f"{label} {measure} ({unit}) = {formula}. {meaning} "
+               f"Overall compares matched survey means; other summaries use 10 m {'percentages' if show_percentage else 'value differences'}. "
+               "All matched points are included, including exclusions.")
+    undefined = int(raw[value_col].isna().sum())
+    if show_percentage and undefined:
         st.caption(f"{undefined:,} points have a zero pre value; their {measure} percentage is unavailable and omitted from percentage summaries.")
     x_col = "start_m" if section_m == 100 else "chainage"
-    chart = table.dropna(subset=[pct_col]).copy()
+    chart = table.dropna(subset=[value_col]).copy()
     chart["Outcome"] = np.select(
-        [chart[pct_col] > 0, chart[pct_col] < 0],
+        [chart[value_col] > 0, chart[value_col] < 0],
         [positive_label, negative_label], default="Unchanged"
     )
-    fig = px.bar(chart, x=x_col, y=pct_col, color="Outcome",
+    fig = px.bar(chart, x=x_col, y=value_col, color="Outcome",
                  color_discrete_map={positive_label: positive_colour, negative_label: negative_colour, "Unchanged": "#737373"},
                  title=f"{label} {measure} ({section_m} m)",
-                 labels={x_col: "Chainage (m)", pct_col: f"{measure.capitalize()} (%)"},
+                 labels={x_col: "Chainage (m)", value_col: f"{measure.capitalize()} ({unit})"},
                  hover_data=["matched_count"])
     fig.update_traces(width=section_m * 0.85)
     fig.add_hline(y=0, line_color="#737373")
@@ -1575,7 +1575,7 @@ def _show_comparison_analysis(delta, primary_col, pre_col, label, resolution):
                "100 m sections use matched-pair means in [start, end) chainage bins; "
                "matched_count shows coverage, including partial sections.")
     st.dataframe(table, use_container_width=True, hide_index=True,
-                 column_config={pct_col: st.column_config.NumberColumn(f"{measure.capitalize()} (%)", format="%.2f%%")})
+                 column_config={value_col: st.column_config.NumberColumn(f"{measure.capitalize()} ({unit})", format="%.2f%%" if show_percentage else "%.3f mm")})
     st.download_button(f"Download {label} table CSV", table.to_csv(index=False).encode("utf-8"),
                        file_name=f"{label.lower()}_comparison_{section_m}m.csv", mime="text/csv",
                        key=f"{label}_comparison_csv")
@@ -2123,6 +2123,11 @@ if tab_compare is not None:
         comp_ride = _apply_chainage_offset(comparison_survey.ride_10m, offset_m)
         comp_mpd = _apply_chainage_offset(comparison_survey.mpd_10m, offset_m)
 
+        comparison_show_percentage = st.toggle(
+            "Show percentage difference", value=True,
+            help="Switch off to show value differences in mm in comparison summaries, charts, tables and CSV downloads. PDF reports use percentages."
+        )
+
         comparison_resolution = st.radio(
             "Comparison detail resolution", ["Automatic", "10 m", "100 m"], horizontal=True,
             help="Automatic uses 100 m sections when the matched chainage span exceeds 1,000 m."
@@ -2176,7 +2181,7 @@ if tab_compare is not None:
                 st.plotly_chart(fig, use_container_width=True)
 
             ukri_delta = _comparison_delta(primary_ukri, comparison_ukri, "combined_ukri", "primary_ukri", "comparison_ukri")
-            _show_comparison_analysis(ukri_delta, "primary_ukri", "comparison_ukri", "UKRI", comparison_resolution)
+            _show_comparison_analysis(ukri_delta, "primary_ukri", "comparison_ukri", "UKRI", comparison_resolution, comparison_show_percentage)
         elif not survey.ride_10m.empty or not comparison_survey.ride_10m.empty:
             st.info("No matching UKRI tracks were found for comparison.")
 
@@ -2207,7 +2212,7 @@ if tab_compare is not None:
                 st.plotly_chart(fig, use_container_width=True)
 
             mpd_delta = _comparison_delta(primary_mpd, comparison_mpd, "combined_mpd_mm", "primary_mpd_mm", "comparison_mpd_mm")
-            _show_comparison_analysis(mpd_delta, "primary_mpd_mm", "comparison_mpd_mm", "MPD", comparison_resolution)
+            _show_comparison_analysis(mpd_delta, "primary_mpd_mm", "comparison_mpd_mm", "MPD", comparison_resolution, comparison_show_percentage)
         elif not survey.mpd_10m.empty or not comparison_survey.mpd_10m.empty:
             st.info("No matching MPD tracks were found for comparison.")
 

@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 
-PARSER_VERSION = "2026-08-19-bcd-ukri-elvp-edge-padding-v7"
+PARSER_VERSION = "2026-08-28-bcd-ukri-certified-edge-validity-v8"
 MAX_REASONABLE_RI = 100.0
 FLOAT_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
 DATETIME_RE = re.compile(r"\d{1,2}-[A-Za-z]{3}-\d{4}\s*\d{1,2}:\d{2}")
@@ -771,7 +771,14 @@ def _convolve_same_edge_padded(values: np.ndarray, kernel: np.ndarray) -> np.nda
     left_pad = len(kernel) // 2
     right_pad = len(kernel) - 1 - left_pad
     padded = np.pad(values, (left_pad, right_pad), mode="edge")
-    return np.convolve(padded, kernel, mode="valid")
+    filtered = np.convolve(padded, kernel, mode="valid")
+    # Appendix D states that a filtered value cannot be calculated within
+    # half a filter width of either survey end. Padding is used only to keep
+    # array positions stable; those unsupported results must not become RI.
+    filtered[:left_pad] = np.nan
+    if right_pad:
+        filtered[-right_pad:] = np.nan
+    return filtered
 
 
 def _roughness_index(elpv3: float, elpv10: float) -> float:
